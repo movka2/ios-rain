@@ -8,7 +8,7 @@
 
 </div>
 
-> **2026-10-24: first light.** XNU reaches UFS, mounts the HFS+ iOS root, starts `launchd`, `backboardd` and `SpringBoard`, and draws the iOS 16 lock screen. The clock advances. Touch is not enabled yet, so this is a bring-up demo, not a usable phone.
+> **2026-10-24: first light.** XNU reaches UFS, mounts the HFS+ iOS root, starts `launchd`, `backboardd` and `SpringBoard`, and draws the iOS 16 lock screen at the native iPhone X size. The clock advances. The FocalTech SPI touch driver is written but not yet built or tested, so this is still a bring-up demo.
 
 This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), which brought the iPhone X userland to the Redmi Note 12 4G. The original topaz README, including the full engineering history of the XNU port, is preserved as [README.topaz.md](README.topaz.md).
 
@@ -21,10 +21,10 @@ This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), whi
 | Memory | 1.75 GiB at `0x80000000`, below the firmware carve-out |
 | Storage | UFS host driver; iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone X 16.7.16 (20H392) root and shared cache; `launchd` and system daemons run |
-| Display | 720×1650 `ft8006s` DSI panel, presented to iOS as an iPhone X 375×812-point display (750×1624 @2x), with a 15 px side crop and 13 px letterbox |
+| Display | 720×1650 `ft8006s` DSI panel; presented as the native iPhone X 1125×2436 @3x (375×812 points), scaled to 762×1650 with a 21 px side crop and no letterbox |
 | Brightness | Panel DBV set to `0x7ff` at boot for bring-up; CoreBrightness integration is still to come |
 | GUI | `backboardd` and `SpringBoard`; iOS 16 lock screen with a running clock |
-| Touch | **Not yet.** FocalTech SPI bring-up is the next step |
+| Touch | FocalTech FTS SPI driver written (`0953-rain-touch-fts-spi.patch`); waiting for kernel CI and hardware test. The current boot image still uses `sweettouch=0` |
 | GPU | No hardware acceleration; frames are composed on the CPU at 30 Hz |
 | RTC | No driver yet, so the date starts at 31 December |
 | Audio, Wi-Fi, cellular, camera, sensors | Not ported |
@@ -39,7 +39,7 @@ This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), whi
 | RAM | 4 GB LPDDR4 |
 | Storage | UFS 2.2 |
 | Panel | `ft8006s`, 720×1650, DSI video mode, 60 Hz, ~269 ppi |
-| Touch | FocalTech `fts_ts`, SPI on QUP0 SE0 (`0x4a80000`), reset GPIO86, IRQ GPIO80 |
+| Touch | FocalTech `fts_ts`, SPI on QUP0 SE0 (`0x4a80000`), reset GPIO86, IRQ GPIO80, AVDD GPIO98 |
 | Bootloader | Unlocked Xiaomi ABL; slot `_b` |
 
 The kernel runs on the four A73 cores. The A53 cores cannot translate 16K pages, which XNU and the iOS 16 userland require.
@@ -98,14 +98,14 @@ python3 tools/mkadt.py shim/out/rain.adt --rain
 
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet \
     shim/out/rain.adt shim/out/payload-rain-debug.bin \
-    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=0'
+    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=1'
 
 MKBOOTIMG=/usr/share/android-tools/mkbootimg/mkbootimg.py \
     shim/build.sh ../shim/out/payload-rain-debug.bin
 cp shim/out/shim-boot.img shim/out/shim-boot-rain-debug.img
 ```
 
-The ADT describes the rain memory map, the 750×1624 canvas and the iPhone X identity. The shim uses the 720×1650 panel geometry from `shim/console.h`.
+The ADT describes the rain memory map, the 1125×2436 canvas and the iPhone X identity. The shim uses the 720×1650 panel geometry from `shim/console.h`.
 
 ### 4. Flash and boot
 
@@ -121,14 +121,16 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Root on `userdata`, writable |
 | `cpus=4` | All four A73 cores; `cpus=1` is the safe fallback |
 | `sweetfb_hz=30` | CPU frame-copy rate |
-| `sweettouch=0` | Touch driver disabled during bring-up |
+| `sweettouch=1` | Enable the FTS SPI touch driver (default; the current test image sets `0`) |
+| `sweettouchdelay=45` | Seconds to wait before probing touch (default 45) |
+| `sweettouchdiag=1` | Dump touch diagnostics and panic on exit; `2` also panics after 3000 frames |
 | `sweetfb_native=1` | Present the raw 720×1650 panel instead of the 375×812-point display (debugging only; the red UIKit status bar returns) |
 | `sweetfb_noconsole=1` | Stop drawing kernel text after the first iOS frame; omit it while debugging |
 | `launchd_unsecure_cache=1`, `wdt=-1 wdt_test=no_user_checkin` | Launchd without AMFI; no hardware watchdog |
 
 ## Roadmap
 
-1. **FocalTech SPI touch.** QUP0 SE0, reset GPIO86, IRQ GPIO80, 720×1650 coordinates.
+1. **FocalTech SPI touch.** QUP0 SE0, reset GPIO86, IRQ GPIO80, AVDD GPIO98, 720×1650 coordinates. Driver written; build it in CI, test on hardware, then replace 10 ms polling with the IRQ line.
 2. **Display polish.** CoreBrightness, DSI/MDP timing, panel power, dot pitch, and a proper solution for the 720×1650 presentation.
 3. **Real-time clock** from the PMIC RTC or passed in by the shim.
 4. **GPU / 60 Hz.** CPU composition is the current limit.
@@ -139,7 +141,7 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | Path | What |
 | --- | --- |
 | `shim/` | Bare-metal boot shim, boot image v4, Gold hand-off, GIC setup, payload loader |
-| `xnu/patches/` | XNU patch series, applied in order by CI; rain-specific patches start at `0951` |
+| `xnu/patches/` | XNU patch series, applied in order by CI; rain-specific patches start at `0951`, touch is `0953` |
 | `.github/workflows/xnu.yml` | Kernel CI build |
 | `tools/mkadt.py` | Apple Device Tree for rain (`--rain`) and topaz |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot arguments into the shim payload |

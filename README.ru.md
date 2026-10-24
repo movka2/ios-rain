@@ -8,7 +8,7 @@
 
 </div>
 
-> **2026-10-24: первый свет.** XNU доходит до UFS, монтирует HFS+ с iOS, запускает `launchd`, `backboardd` и `SpringBoard` и рисует экран блокировки iOS 16. Часы идут. Тач пока не включён, так что это демонстрация bring-up, а не повседневная система.
+> **2026-10-24: первый свет.** XNU доходит до UFS, монтирует HFS+ с iOS, запускает `launchd`, `backboardd` и `SpringBoard` и рисует экран блокировки iOS 16 в нативном размере iPhone X. Часы идут. Драйвер FocalTech SPI написан, но ещё не собран и не проверен на железе, так что это по-прежнему демонстрация bring-up.
 
 Это порт [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), в котором userland iPhone X был запущен на Redmi Note 12 4G. Оригинальный README topaz с полной историей портирования XNU сохранён как [README.topaz.md](README.topaz.md).
 
@@ -21,10 +21,10 @@
 | Память | 1,75 ГиБ по адресу `0x80000000`, ниже carve-out прошивки |
 | Хранилище | Драйвер UFS; корень iOS — журналируемый HFS+ в `userdata`, чтение/запись |
 | Userland iOS | Настоящий корень и shared cache iPhone X 16.7.16 (20H392); работают `launchd` и системные демоны |
-| Дисплей | Панель `ft8006s` 720×1650 DSI; для iOS выглядит как iPhone X 375×812 точек (750×1624 @2x), с обрезкой 15 px по бокам и полями 13 px |
+| Дисплей | Панель `ft8006s` 720×1650 DSI; для iOS выглядит как нативный iPhone X 1125×2436 @3x (375×812 точек), масштабируется в 762×1650 с обрезкой 21 px по бокам и без полей |
 | Яркость | DBV панели `0x7ff` при загрузке для bring-up; интеграция CoreBrightness ещё впереди |
 | GUI | `backboardd` и `SpringBoard`; экран блокировки iOS 16 с идущими часами |
-| Тач | **Пока нет.** Следующий шаг — FocalTech SPI |
+| Тач | Драйвер FocalTech FTS SPI написан (`0953-rain-touch-fts-spi.patch`); ждёт CI и проверки на железе. В текущем boot-образе всё ещё `sweettouch=0` |
 | GPU | Аппаратного ускорения нет; кадры собираются на CPU при 30 Гц |
 | RTC | Драйвера нет, дата начинается с 31 декабря |
 | Аудио, Wi-Fi, сотовая связь, камера, датчики | Не портированы |
@@ -39,7 +39,7 @@
 | RAM | 4 ГБ LPDDR4 |
 | Хранилище | UFS 2.2 |
 | Панель | `ft8006s`, 720×1650, DSI video mode, 60 Гц, ~269 ppi |
-| Тач | FocalTech `fts_ts`, SPI на QUP0 SE0 (`0x4a80000`), reset GPIO86, IRQ GPIO80 |
+| Тач | FocalTech `fts_ts`, SPI на QUP0 SE0 (`0x4a80000`), reset GPIO86, IRQ GPIO80, AVDD GPIO98 |
 | Загрузчик | Разблокированный ABL Xiaomi; слот `_b` |
 
 Ядро работает на четырёх ядрах A73. Ядра A53 не умеют транслировать страницы 16 КиБ, которые нужны XNU и userland iOS 16.
@@ -98,14 +98,14 @@ python3 tools/mkadt.py shim/out/rain.adt --rain
 
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet \
     shim/out/rain.adt shim/out/payload-rain-debug.bin \
-    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=0'
+    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=1'
 
 MKBOOTIMG=/usr/share/android-tools/mkbootimg/mkbootimg.py \
     shim/build.sh ../shim/out/payload-rain-debug.bin
 cp shim/out/shim-boot.img shim/out/shim-boot-rain-debug.img
 ```
 
-ADT описывает карту памяти rain, canvas 750×1624 и идентичность iPhone X. Shim использует геометрию панели 720×1650 из `shim/console.h`.
+ADT описывает карту памяти rain, canvas 1125×2436 и идентичность iPhone X. Shim использует геометрию панели 720×1650 из `shim/console.h`.
 
 ### 4. Прошивка и загрузка
 
@@ -121,14 +121,16 @@ fastboot boot shim/out/shim-boot-rain-debug.img
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Корень на `userdata`, чтение/запись |
 | `cpus=4` | Все четыре ядра A73; `cpus=1` — безопасный fallback |
 | `sweetfb_hz=30` | Частота копирования кадров на CPU |
-| `sweettouch=0` | Драйвер тача выключен на время bring-up |
+| `sweettouch=1` | Включить FTS SPI драйвер тача (по умолчанию; текущий тестовый образ ставит `0`) |
+| `sweettouchdelay=45` | Задержка перед запуском тача в секундах (по умолчанию 45) |
+| `sweettouchdiag=1` | Диагностика тача и panic при выходе; `2` — ещё и panic после 3000 кадров |
 | `sweetfb_native=1` | Показать сырую панель 720×1650 вместо дисплея 375×812 точек (только отладка; красная плашка UIKit возвращается) |
 | `sweetfb_noconsole=1` | Перестать рисовать текст ядра после первого кадра iOS; не указывайте при отладке |
 | `launchd_unsecure_cache=1`, `wdt=-1 wdt_test=no_user_checkin` | launchd без AMFI; без аппаратного watchdog |
 
 ## Планы
 
-1. **FocalTech SPI touch.** QUP0 SE0, reset GPIO86, IRQ GPIO80, координаты 720×1650.
+1. **FocalTech SPI touch.** QUP0 SE0, reset GPIO86, IRQ GPIO80, AVDD GPIO98, координаты 720×1650. Драйвер написан; собрать в CI, проверить на железе, затем заменить polling 10 мс на линию IRQ.
 2. **Доводка дисплея.** CoreBrightness, тайминги DSI/MDP, питание панели, dot pitch и нормальное решение для представления 720×1650.
 3. **Часы реального времени** из PMIC RTC или из shim.
 4. **GPU / 60 Гц.** Сейчас ограничение — композиция на CPU.
@@ -139,7 +141,7 @@ fastboot boot shim/out/shim-boot-rain-debug.img
 | Путь | Что |
 | --- | --- |
 | `shim/` | Bare-metal загрузочный shim, boot image v4, передача Gold-ядра, настройка GIC, загрузчик payload |
-| `xnu/patches/` | Серия патчей XNU, применяется CI по порядку; патчи для rain начинаются с `0951` |
+| `xnu/patches/` | Серия патчей XNU, применяется CI по порядку; патчи для rain начинаются с `0951`, тач — `0953` |
 | `.github/workflows/xnu.yml` | CI-сборка ядра |
 | `tools/mkadt.py` | Apple Device Tree для rain (`--rain`) и topaz |
 | `tools/mkpayload.py` | Упаковка ядра + ADT + аргументов загрузки в payload shim |
