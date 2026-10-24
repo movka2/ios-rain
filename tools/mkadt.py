@@ -33,6 +33,17 @@ GICR, GICR_SIZE = 0x0f300000, 0x100000
 FB, FB_SIZE = 0x5c000000, 0xf00000
 SWEET_ECID = 0x544f50415a000001  # 'TOPAZ' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
+# --rain (Redmi 10C, SM6225 "rain"): the 4 GB LPDDR4 is the low 3 GiB bank at
+# 0x80000000 plus 0x63..0x7d; 0xf3c00000-0xffbfffff is reserved by firmware.
+# Use 1.75 GiB from 0x80000000 to 0xf0000000 (below that carve-out) for XNU.
+RAIN_PHYS_BASE = 0x80000000
+RAIN_MEM_SIZE = 0x70000000
+RAIN_FB_W, RAIN_FB_H = 720, 1650
+RAIN_FB_STRIDE = RAIN_FB_W * 4
+# The panel is 360x825 points @2x, which UIKit does not know; present the
+# iPhone X 375x812 points (750x1624 @2x) and crop/letterbox in the kernel.
+RAIN_CANVAS_W, RAIN_CANVAS_H = 750, 1624
+RAIN_DISPLAY_SCALE = 2
 # Internal UFS host (ufshc@4804000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x04804000, 0x3000
 TIMEBASE = 19200000
@@ -76,10 +87,29 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = ((MID_PHYS_BASE, MID_MEM_SIZE) if midmem else
-                           (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE))
+def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, rain=False):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
+
+    rain=True: Redmi 10C (SM6225 "rain") memory bank, 720x1650 panel and
+    display scale. Everything else (iPhone X identity) is unchanged.
+    """
+    if rain:
+        phys_base, mem_size = RAIN_PHYS_BASE, RAIN_MEM_SIZE
+        fb_w, fb_h, fb_stride = RAIN_FB_W, RAIN_FB_H, RAIN_FB_STRIDE
+        canvas_w, canvas_h = RAIN_CANVAS_W, RAIN_CANVAS_H
+        display_scale = RAIN_DISPLAY_SCALE
+        cpu_clock, mem_clock = 2400000000, 1800000000
+        fw_version = 'rain-shim'
+        soc_compat = cstr('xiaomi,rain') + cstr('qcom,bengal')
+    else:
+        phys_base, mem_size = ((MID_PHYS_BASE, MID_MEM_SIZE) if midmem else
+                               (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE))
+        fb_w, fb_h, fb_stride = FB_W, FB_H, FB_STRIDE
+        canvas_w, canvas_h = (1080, 2400) if native else (1125, 2436)
+        display_scale = 3
+        cpu_clock, mem_clock = 2803200000, 1866000000
+        fw_version = 'topaz-shim'
+        soc_compat = cstr('xiaomi,topaz') + cstr('qcom,khaje')
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
@@ -91,8 +121,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('firmware-version', cstr('topaz-shim')),
-        ('system-firmware-version', cstr('topaz-shim')),
+        ('firmware-version', cstr(fw_version)),
+        ('system-firmware-version', cstr(fw_version)),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -102,9 +132,9 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ('crypto-hash-method', cstr('sha2-384')),
         # MobileGestalt's screen class: display-scale (u32, default 0) comes
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
-        # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
-        # 360x800 points (like iPhone X class devices).
-        ('display-scale', u32(3)),
+        # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. topaz 1080x2400
+        # @3x = 360x800 points; rain is presented as 750x1624 @2x = 375x812.
+        ('display-scale', u32(display_scale)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
@@ -149,9 +179,9 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2803200000)),
+            ('clock-frequency', u32(cpu_clock)),
             ('bus-frequency', u32(100000000)),
-            ('memory-frequency', u32(1866000000)),
+            ('memory-frequency', u32(mem_clock)),
             ('peripheral-frequency', u32(timebase)),
             ('fixed-frequency', u32(timebase)),
         ]))
@@ -182,29 +212,32 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         # (the presented iPhone X size, see SweetFramebuffer.cpp);
         # the kernel's AppleCLCD matches the compatible string.
         # launchd starts wifid only when the device tree has a "wlan" node
-        # (com.apple.wifid _LimitLoadToDeviceTree = wlan, marconi-wifi)
-        node('wlan', [
+        # (com.apple.wifid _LimitLoadToDeviceTree = wlan, marconi-wifi).
+        # rain: leave it out for the first boot; its modem/WLAN firmware is
+        # not the topaz one and wifid is not needed for the lock screen.
+        *([] if rain else [node('wlan', [
             ph(),
             ('device_type', cstr('wlan')),
             ('compatible', cstr('topaz,wcn3988')),
-        ]),
+        ])]),
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
             # --native: present the real 1080x2400 panel (needed for direct MDP scanout,
             # which must match the canvas: sweetfb_native=1 with a 1125x2436 canvas makes
-            # backboardd ask for a hardware scaler that does not exist)
-            ('canvas-width', u32(1080 if native else 1125)),
-            ('canvas-height', u32(2400 if native else 2436)),
+            # backboardd ask for a hardware scaler that does not exist).
+            # rain: 720x1650 panel, presented as 750x1624 (375x812 @2x).
+            ('canvas-width', u32(canvas_w)),
+            ('canvas-height', u32(canvas_h)),
         ])])
 
     fbcon = node('sweet-fbcon', [
         ph(),
         ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('width', u32(fb_w)),
+        ('height', u32(fb_h)),
+        ('stride', u32(fb_stride)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
@@ -243,7 +276,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
     # SweetPlatformExpert and CPU IONameMatch still use them.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,topaz') + cstr('xiaomi,sweet') + cstr('qcom,khaje') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + soc_compat + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -255,7 +288,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 native='--native' in sys.argv, midmem='--midmem' in sys.argv)
+                 native='--native' in sys.argv, midmem='--midmem' in sys.argv,
+                 rain='--rain' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

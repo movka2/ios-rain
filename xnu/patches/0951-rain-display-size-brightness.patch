@@ -1,0 +1,127 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -131,17 +131,18 @@
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
+ #define SWEET_FB_VSYNC_US               16667
+-#define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
++#define SWEET_FB_DOT_PITCH              269     /* ppi, 6.52" 720x1650 panel */
+ /*
+  * The iOS userland only has status bar / layout data for real iPhone
+  * screens (UIKit: "No status bar visual provider for screen", the red
+- * rdar://45025538 bar for 360x800 points). The display is therefore
+- * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+- * centered 1080x2400 part of it is shown on the 1080x2400 panel.
++ * rdar://45025538 bar for 360x825 points). rain's 720x1650 panel is
++ * 360x825 points at @2x, which is not an iPhone size; present it as
++ * 375x812 points (750x1624 @2x, iPhone X) and show the center 720x1624
++ * of it, with 13 px black bars above and below.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
+-#define SWEET_FB_LOGICAL_W              1125
+-#define SWEET_FB_LOGICAL_H              2436
++#define SWEET_FB_LOGICAL_W              750
++#define SWEET_FB_LOGICAL_H              1624
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+ 
+ class IOMobileFramebuffer : public IOService {
+@@ -329,13 +330,17 @@
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	if (fLogicalH > fHeight) {
++		/* letterboxed: the MDP cannot scan this window, so the CPU copy path runs */
++		fOffX = (int32_t)(fLogicalW - fWidth) / 2;
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -361,12 +366,14 @@
+ 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
+ 	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+ 	fBlLock = IOLockAlloc();
+-	fBlLevel = 0x133;                       /* panel init level (stock DT) */
++	fBlLevel = 0x7ff;                       /* rain: panel DBV max for bring-up */
+ 	fBlSent = ~0u;
+ 	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
+ 	if (fDsi != NULL) {
+ 		IOLog("SWEET FB: DSI0 ctrl %#x, brightness via DCS 0x51\n", *(volatile uint32_t *)(fDsi + 0x004));
+-		setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
++		setProperty("IOMFBBrightnessLevel", (unsigned long long)(SWEET_FB_MAX_NITS << 16), 32);
++		setPanelLevel(fBlLevel);
++		fBlSent = fBlLevel;
+ 		/*
+ 		 * Off unless sweetbl=1: with a backlight service CoreBrightness also
+ 		 * runs digital dimming, a colour filter over every frame, which the
+@@ -378,7 +385,7 @@
+ 		if (bl != NULL && bl->init()) {
+ 			bl->fFB = this;
+ 			bl->setProperty("backlight-control", true);
+-			bl->setProperty("brightness-nits", (unsigned long long)200, 32);
++			bl->setProperty("brightness-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
+ 			bl->setProperty("max-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
+ 			if (bl->attach(this)) {
+ 				bl->registerService();
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -434,14 +434,14 @@
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? 720 : 750;
++	fLogicalH = native ? 1650 : 1624;
++	fOffX = native ? 0 : (fLogicalW - 720) / 2;      /* as SweetFramebuffer.cpp */
++	fOffY = native ? 0 : (fLogicalH - 1650) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++	setProperty("SurfaceHeight", (unsigned long long)(156 << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,22 +458,25 @@
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > 719 ? 719 : x);
++	y = y < 0 ? 0 : (y > 1649 ? 1649 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	/* Panel pixels -> the presented 750x1624 display (SweetFramebuffer.cpp). */
++	int lx = x + fOffX, ly = y + fOffY;
++	lx = lx < 0 ? 0 : (lx >= fLogicalW ? fLogicalW - 1 : lx);
++	ly = ly < 0 ? 0 : (ly >= fLogicalH ? fLogicalH - 1 : ly);
++	IOFixed nx = (IOFixed)(((int64_t)lx << 16) / fLogicalW);
++	IOFixed ny = (IOFixed)(((int64_t)ly << 16) / fLogicalH);
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 719 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > 1649 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
