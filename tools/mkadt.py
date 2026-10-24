@@ -41,9 +41,9 @@ RAIN_MEM_SIZE = 0x70000000
 RAIN_FB_W, RAIN_FB_H = 720, 1650
 RAIN_FB_STRIDE = RAIN_FB_W * 4
 # The panel is 360x825 points @2x, which UIKit does not know; present the
-# iPhone X 375x812 points (750x1624 @2x) and crop/letterbox in the kernel.
-RAIN_CANVAS_W, RAIN_CANVAS_H = 750, 1624
-RAIN_DISPLAY_SCALE = 2
+# real iPhone X 1125x2436 @3x (375x812 points) and scale it to the panel.
+RAIN_CANVAS_W, RAIN_CANVAS_H = 1125, 2436
+RAIN_DISPLAY_SCALE = 3
 # Internal UFS host (ufshc@4804000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x04804000, 0x3000
 TIMEBASE = 19200000
@@ -133,7 +133,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, rain
         # MobileGestalt's screen class: display-scale (u32, default 0) comes
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. topaz 1080x2400
-        # @3x = 360x800 points; rain is presented as 750x1624 @2x = 375x812.
+        # @3x = 360x800 points; rain is presented as 1125x2436 @3x = 375x812.
         ('display-scale', u32(display_scale)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
@@ -227,7 +227,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, rain
             # --native: present the real 1080x2400 panel (needed for direct MDP scanout,
             # which must match the canvas: sweetfb_native=1 with a 1125x2436 canvas makes
             # backboardd ask for a hardware scaler that does not exist).
-            # rain: 720x1650 panel, presented as 750x1624 (375x812 @2x).
+            # rain: 720x1650 panel, presented as 1125x2436 (375x812 @3x).
             ('canvas-width', u32(canvas_w)),
             ('canvas-height', u32(canvas_h)),
         ])])
