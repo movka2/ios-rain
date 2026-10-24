@@ -4,7 +4,7 @@
 
 **Apple's XNU kernel and the unmodified iPhone X 16.7.16 userland on a Xiaomi `rain` (Snapdragon 680 / SM6225).**
 
-[Status](#status) · [Hardware](#hardware) · [How it boots](#how-it-boots) · [Build](#build-it-yourself) · [Roadmap](#roadmap) · [Credits](#credits)
+[Русский](README.ru.md) · [Status](#status) · [Hardware](#hardware) · [How it boots](#how-it-boots) · [Build](#build-it-yourself) · [Roadmap](#roadmap) · [Credits](#credits)
 
 </div>
 
