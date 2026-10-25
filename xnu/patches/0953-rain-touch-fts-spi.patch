@@ -13,7 +13,7 @@
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
  #include <sys/systm.h>
-@@ -15,85 +6,127 @@
+@@ -15,85 +6,131 @@
  #include <kern/thread.h>
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
@@ -49,6 +49,10 @@
 +#define TOUCH_PIN_RESET   86u
 +#define TOUCH_PIN_IRQ     80u
 +#define TOUCH_PIN_AVDD    98u
++#define TOUCH_PIN_SCLK    2u
++#define TOUCH_PIN_MOSI    1u
++#define TOUCH_PIN_MISO    0u
++#define TOUCH_PIN_CS      3u
  #define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)
  #define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)
 -#define TOUCH_MAX        10u
@@ -183,7 +187,7 @@
 +	vm_offset_t se, gcc, west, south;
 +	vm_offset_t dma;
 +	uint64_t dma_pa;
-+	bool use_dma;
++	bool use_dma, use_bitbang;
 +	bool started, dead;
  	int diag;
  	const char *stage;
@@ -204,7 +208,7 @@
  } st;
  static int touch_sleep_chan;
  
-@@ -134,11 +167,10 @@
+@@ -134,11 +171,10 @@
  	return false;
  }
  
@@ -217,7 +221,7 @@
  }
  
  static void
-@@ -148,7 +180,6 @@
+@@ -148,7 +184,6 @@
  	uint32_t off = TOUCH_GPIO_CFG(pin);
  	uint32_t cfg = touch_rd(tile, off);
  	if (out) {
@@ -225,7 +229,58 @@
  		touch_wr(tile, TOUCH_GPIO_IO(pin),
  		    (touch_rd(tile, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
  	}
-@@ -160,37 +191,43 @@
+@@ -157,40 +192,94 @@
+ 	touch_wr(tile, off, cfg);
+ }
+ 
++static void
++touch_bb_out(unsigned pin, bool high)
++{
++	vm_offset_t tile = touch_tile(pin);
++	uint32_t v = touch_rd(tile, TOUCH_GPIO_IO(pin));
++	v = (v & ~2u) | (high ? 2u : 0u);
++	touch_wr(tile, TOUCH_GPIO_IO(pin), v);
++}
++
++static bool
++touch_bb_in(unsigned pin)
++{
++	return (touch_rd(touch_tile(pin), TOUCH_GPIO_IO(pin)) & 1u) != 0;
++}
++
++static uint8_t
++touch_bb_byte(uint8_t out)
++{
++	uint8_t in = 0;
++	for (int bit = 7; bit >= 0; --bit) {
++		touch_bb_out(TOUCH_PIN_MOSI, (out >> bit) & 1u);
++		delay(1);
++		touch_bb_out(TOUCH_PIN_SCLK, true);
++		delay(1);
++		in = (uint8_t)((in << 1) | (touch_bb_in(TOUCH_PIN_MISO) ? 1u : 0u));
++		touch_bb_out(TOUCH_PIN_SCLK, false);
++		delay(1);
++	}
++	return in;
++}
++
++static int
++touch_spi_xfr_bitbang(const uint8_t *tx, unsigned n, uint8_t *rx)
++{
++	if (n == 0 || n > 120) {
++		return EIO;
++	}
++	touch_bb_out(TOUCH_PIN_CS, false);
++	delay(1);
++	for (unsigned i = 0; i < n; ++i) {
++		rx[i] = touch_bb_byte(tx[i]);
++	}
++	delay(1);
++	touch_bb_out(TOUCH_PIN_CS, true);
++	delay(1);
++	return 0;
++}
++
  static bool
  touch_clocks(void)
  {
@@ -282,7 +337,7 @@
  	touch_wr(st.se, SE_CTRL, 4);
  	for (unsigned i = 0; i < 1000; ++i) {
  		if (touch_rd(st.se, SE_IRQ) & (1u << 4)) {
-@@ -200,7 +237,7 @@
+@@ -200,7 +289,7 @@
  		delay(1);
  	}
  	if (!done) {
@@ -291,7 +346,7 @@
  		for (unsigned i = 0; i < 1000; ++i) {
  			if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
  				done = true;
-@@ -211,21 +248,19 @@
+@@ -211,21 +300,19 @@
  	}
  	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
  		st.dead = true;
@@ -318,7 +373,7 @@
  static uint32_t
  touch_irq(void)
  {
-@@ -234,163 +269,349 @@
+@@ -234,163 +321,352 @@
  	return st.irq_last;
  }
  
@@ -531,11 +586,14 @@
 -	    NULL, 0, true);
 -	if (err) {
 -		return err;
-+	if (st.use_dma) {
-+		return touch_spi_xfr_dma(tx, n, rx);
++	if (st.use_bitbang) {
++		return touch_spi_xfr_bitbang(tx, n, rx);
  	}
 -	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
 -	return touch_msg(addr, NULL, 0, buf, len, false);
++	if (st.use_dma) {
++		return touch_spi_xfr_dma(tx, n, rx);
++	}
 +	return touch_spi_xfr_fifo(tx, n, rx);
  }
  
@@ -759,7 +817,7 @@
  }
  
  static void
-@@ -401,7 +622,7 @@
+@@ -401,7 +677,7 @@
  		if (mask & bit) {
  			if (!(st.active & bit) || x[id] != st.x[id] || y[id] != st.y[id]) {
  				sweet_hid_touch((int)id, 1, x[id], y[id]);
@@ -768,7 +826,7 @@
  				st.s_lastx = x[id];
  				st.s_lasty = y[id];
  			}
-@@ -409,332 +630,213 @@
+@@ -409,332 +685,223 @@
  			st.y[id] = y[id];
  		} else if (st.active & bit) {
  			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
@@ -1018,7 +1076,8 @@
 +			    st.stage ? st.stage : "?", st.s_frames, st.dead,
 +			    st.s_down, st.s_up, st.s_errs, st.s_lasterr, st.s_maxn,
 +			    st.d_vote, st.d_cfg, st.d_cbcr, st.d_fw, st.d_status,
-+			    st.se ? touch_rd(st.se, 0x64) : 0u, st.d_idh, st.d_idl,
++			    (!st.use_bitbang && st.se) ? touch_rd(st.se, 0x64) : 0u,
++			    st.d_idh, st.d_idl,
 +			    st.d_id1, st.d_id2, st.irq_status,
 +			    st.s_raw[0], st.s_raw[1], st.s_raw[2], st.s_raw[3],
 +			    st.s_raw[4], st.s_raw[5], st.s_raw[6], st.s_raw[7],
@@ -1074,37 +1133,48 @@
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
  	}
+-	st.stage = "clocks";
+-	if (!touch_clocks()) {
 +	st.stage = "dma";
 +	if (kmem_alloc_contig(kernel_map, &st.dma, SE_DMA_SIZE, PAGE_MASK, 0, 0,
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		printf("SWEET TOUCH: no contiguous DMA memory\n");
-+		goto out;
-+	}
-+	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
-+	if (!pn) {
-+		printf("SWEET TOUCH: DMA page not mapped\n");
-+		goto out;
-+	}
-+	st.dma_pa = ptoa_64(pn);
-+	printf("SWEET TOUCH: dma va=%#lx pa=%#llx\n", (unsigned long)st.dma,
-+	    (unsigned long long)st.dma_pa);
- 	st.stage = "clocks";
- 	if (!touch_clocks()) {
  		goto out;
  	}
 -	st.stage = "se2 init";
 -	if (!touch_se_init()) {
-+	st.stage = "se0 init";
-+	if (!touch_spi_init()) {
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
++	if (!pn) {
++		printf("SWEET TOUCH: DMA page not mapped\n");
  		goto out;
  	}
 -	st.stage = "power/reset";
 -	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x avdd=%#x\n",
 -	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_RESET)),
-+	printf("SWEET TOUCH: se0 init done\n");
-+	st.stage = "pins";
-+	for (unsigned pin = 0; pin <= 3; ++pin) {
-+		touch_gpio(pin, 1, 0, 2, false, false);
++	st.dma_pa = ptoa_64(pn);
++	printf("SWEET TOUCH: dma va=%#lx pa=%#llx\n", (unsigned long)st.dma,
++	    (unsigned long long)st.dma_pa);
++	st.stage = "clocks";
++	if (st.use_bitbang) {
++		st.stage = "bb pins";
++		touch_gpio(TOUCH_PIN_SCLK, 0, 0, 2, true, false);
++		touch_gpio(TOUCH_PIN_MOSI, 0, 0, 2, true, false);
++		touch_gpio(TOUCH_PIN_CS, 0, 0, 2, true, true);
++		touch_gpio(TOUCH_PIN_MISO, 0, 3, 2, false, false);
++		printf("SWEET TOUCH: bitbang sclk=2 mosi=1 miso=0 cs=3\n");
++	} else {
++		if (!touch_clocks()) {
++			goto out;
++		}
++		st.stage = "se0 init";
++		if (!touch_spi_init()) {
++			goto out;
++		}
++		printf("SWEET TOUCH: se0 init done\n");
++		st.stage = "pins";
++		for (unsigned pin = 0; pin <= 3; ++pin) {
++			touch_gpio(pin, 1, 0, 2, false, false);
++		}
 +	}
 +	printf("SWEET TOUCH: pins irq=%#x reset=%#x avdd=%#x\n",
  	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_IRQ)),
@@ -1206,10 +1276,10 @@
 +			if ((errors++ % 100u) == 0) {
 +				printf("SWEET TOUCH: report err=%d irq=%#x\n",
 +				    err, st.irq_status);
- 			}
++			}
 +			if (errors == 10) {
 +				touch_report(0, st.x, st.y);
-+			}
+ 			}
 +		} else {
 +			errors = 0;
  		}
@@ -1232,13 +1302,17 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,13 +852,21 @@
+@@ -750,13 +917,25 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
 -	st.irq_hint = 1; /* topaz: read on IRQ GPIO80 low, while touching, else every 100 ms */
 -	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
  	(void)PE_parse_boot_argn("sweettouchdiag", &st.diag, sizeof(st.diag));
++	int bb = 0;
++	if (PE_parse_boot_argn("sweettouchbitbang", &bb, sizeof(bb)) && bb) {
++		st.use_bitbang = true;
++	}
  	if (!enabled) {
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
@@ -1256,7 +1330,7 @@
  	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
  	if (kr == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -764,4 +874,4 @@
+@@ -764,4 +943,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
