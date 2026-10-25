@@ -13,7 +13,7 @@
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
  #include <sys/systm.h>
-@@ -18,82 +9,94 @@
+@@ -18,84 +9,95 @@
  #include <pexpert/pexpert.h>
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -169,9 +169,26 @@
 +	uint8_t d_idh, d_idl;
 +	int d_id1, d_id2;
  } st;
- static int touch_sleep_chan;
+-static int touch_sleep_chan;
  
-@@ -134,11 +137,10 @@
+ static uint32_t
+ touch_rd(vm_offset_t base, uint32_t off)
+@@ -116,10 +118,10 @@
+ static void
+ touch_wait(unsigned ms)
+ {
+-	uint64_t deadline;
+-	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+-	(void)assert_wait_deadline(&touch_sleep_chan, THREAD_UNINT, deadline);
+-	thread_block(THREAD_CONTINUE_NULL);
++	/* A kernel thread has no bootstrap thread; assert_wait/thread_block on
++	 * this uninitialized wait channel never returns.  delay() is fine for
++	 * bring-up polling. */
++	delay(ms * 1000);
+ }
+ 
+ static bool
+@@ -134,11 +136,10 @@
  	return false;
  }
  
@@ -184,7 +201,7 @@
  }
  
  static void
-@@ -148,7 +150,6 @@
+@@ -148,7 +149,6 @@
  	uint32_t off = TOUCH_GPIO_CFG(pin);
  	uint32_t cfg = touch_rd(tile, off);
  	if (out) {
@@ -192,7 +209,7 @@
  		touch_wr(tile, TOUCH_GPIO_IO(pin),
  		    (touch_rd(tile, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
  	}
-@@ -160,37 +161,40 @@
+@@ -160,37 +160,43 @@
  static bool
  touch_clocks(void)
  {
@@ -205,9 +222,12 @@
 -	printf("SWEET TOUCH: gcc vote=%#x rcg=%#x cfg=%#x cbcr=%#x\n",
 -	    touch_rd(st.gcc, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG),
 -	    touch_rd(st.gcc, TOUCH_RCG + 4u), touch_rd(st.gcc, TOUCH_RCG - 4u));
++	printf("SWEET TOUCH: clocks enter vote=%#x\n",
++	    touch_rd(st.gcc, TOUCH_GCC_VOTE));
 +	touch_wr(st.gcc, TOUCH_GCC_VOTE,
 +	    touch_rd(st.gcc, TOUCH_GCC_VOTE) | TOUCH_GCC_VOTE_MSK);
  	st.d_vote = touch_rd(st.gcc, TOUCH_GCC_VOTE);
++	printf("SWEET TOUCH: clocks voted=%#x\n", st.d_vote);
  	touch_wr(st.gcc, TOUCH_RCG + 4u, 1u);
  	touch_wr(st.gcc, TOUCH_RCG, touch_rd(st.gcc, TOUCH_RCG) | 1u);
  	if (!touch_wait_clear(st.gcc, TOUCH_RCG, 1u)) {
@@ -246,7 +266,7 @@
  	touch_wr(st.se, SE_CTRL, 4);
  	for (unsigned i = 0; i < 1000; ++i) {
  		if (touch_rd(st.se, SE_IRQ) & (1u << 4)) {
-@@ -200,7 +204,7 @@
+@@ -200,7 +206,7 @@
  		delay(1);
  	}
  	if (!done) {
@@ -255,7 +275,7 @@
  		for (unsigned i = 0; i < 1000; ++i) {
  			if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
  				done = true;
-@@ -211,21 +215,17 @@
+@@ -211,21 +217,17 @@
  	}
  	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
  		st.dead = true;
@@ -281,7 +301,7 @@
  static uint32_t
  touch_irq(void)
  {
-@@ -234,163 +234,264 @@
+@@ -234,163 +236,267 @@
  	return st.irq_last;
  }
  
@@ -528,6 +548,7 @@
 +touch_spi_init(void)
  {
 -	return ((unsigned)p[0] << 8) | p[1];
++	printf("SWEET TOUCH: se0 init enter\n");
 +	uint32_t fw = touch_rd(st.se, SE_FW);
 +	uint32_t tx = touch_rd(st.se, SE_HW_TX), rx = touch_rd(st.se, SE_HW_RX);
 +	st.d_fw = fw;
@@ -613,11 +634,13 @@
 -	unsigned sum = 0;
 -	for (unsigned i = 0; i + 2 < len; ++i) {
 -		sum += buf[i];
++	printf("SWEET TOUCH: fts reset enter\n");
 +	touch_gpio(TOUCH_PIN_IRQ, 0, 3, 3, false, false);
 +	touch_gpio(TOUCH_PIN_AVDD, 0, 3, 3, true, true);
 +	touch_gpio(TOUCH_PIN_RESET, 0, 3, 3, true, false);
 +	touch_wait(20);
 +	touch_gpio(TOUCH_PIN_RESET, 0, 3, 3, true, true);
++	printf("SWEET TOUCH: fts reset released\n");
 +	touch_wait(250);
 +	uint8_t idh = 0, idl = 0;
 +	int e1 = EIO, e2 = EIO;
@@ -644,7 +667,7 @@
  }
  
  static void
-@@ -401,7 +502,7 @@
+@@ -401,7 +507,7 @@
  		if (mask & bit) {
  			if (!(st.active & bit) || x[id] != st.x[id] || y[id] != st.y[id]) {
  				sweet_hid_touch((int)id, 1, x[id], y[id]);
@@ -653,7 +676,7 @@
  				st.s_lastx = x[id];
  				st.s_lasty = y[id];
  			}
-@@ -409,231 +510,87 @@
+@@ -409,231 +515,96 @@
  			st.y[id] = y[id];
  		} else if (st.active & bit) {
  			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
@@ -899,23 +922,33 @@
 -	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
 -	printf("SWEET TOUCH: starting in %u s\n", delay_s);
 -	touch_wait(delay_s * 1000u);
+-	st.stage = "map";
+-	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
 +	(void)PE_parse_boot_argn("sweettouchdelay", &start_delay, sizeof(start_delay));
 +	printf("SWEET TOUCH: rain FTS SPI starting in %u s\n", start_delay);
-+	touch_wait(start_delay * 1000u);
-+
- 	st.stage = "map";
--	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
++	if (start_delay) {
++		touch_wait(start_delay * 1000u);
++	}
++	printf("SWEET TOUCH: wait done\n");
++	st.stage = "map gcc";
  	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
++	printf("SWEET TOUCH: map gcc=%#lx\n", (unsigned long)st.gcc);
++	st.stage = "map west";
  	st.west = ml_io_map(TOUCH_WEST_PA, 0x58000);
 -	st.east = ml_io_map(TOUCH_EAST_PA, 0x25000);
++	printf("SWEET TOUCH: map west=%#lx\n", (unsigned long)st.west);
++	st.stage = "map south";
 +	st.south = ml_io_map(TOUCH_SOUTH_PA, 0x80000);
++	printf("SWEET TOUCH: map south=%#lx\n", (unsigned long)st.south);
++	st.stage = "map se";
  	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
 -	if (!st.gcc || !st.west || !st.east || !st.se) {
++	printf("SWEET TOUCH: map se=%#lx\n", (unsigned long)st.se);
 +	if (!st.gcc || !st.west || !st.south || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
  	}
-@@ -641,100 +598,62 @@
+@@ -641,100 +612,64 @@
  	if (!touch_clocks()) {
  		goto out;
  	}
@@ -928,6 +961,7 @@
 -	st.stage = "power/reset";
 -	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x avdd=%#x\n",
 -	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_RESET)),
++	printf("SWEET TOUCH: se0 init done\n");
 +	st.stage = "pins";
 +	for (unsigned pin = 0; pin <= 3; ++pin) {
 +		touch_gpio(pin, 1, 0, 2, false, false);
@@ -983,6 +1017,7 @@
  		goto out;
  	}
 -	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
++	printf("SWEET TOUCH: fts reset done\n");
  	st.stage = "polling";
 -	printf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\n",
 -	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);
@@ -1058,7 +1093,7 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,8 +669,6 @@
+@@ -750,8 +685,6 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
@@ -1067,7 +1102,7 @@
  	(void)PE_parse_boot_argn("sweettouchdiag", &st.diag, sizeof(st.diag));
  	if (!enabled) {
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
-@@ -764,4 +681,4 @@
+@@ -764,4 +697,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
