@@ -551,10 +551,10 @@
 +	printf("SWEET TOUCH: SE0 fw=%#x proto=%u status=%#x if_disable=%#x tx=%#x/%u/%u rx=%#x/%u/%u\n",
 +	    fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), touch_rd(st.se, 0x64),
 +	    tx, tx_depth, tx_width, rx, rx_depth, rx_width);
-+	if (((fw >> 8) & 0xffu) != 1u ||
++	if (((fw >> 8) & 0xffu) != 1u || (touch_rd(st.se, 0x64) & 1u) ||
 +	    tx_width != 32u || rx_width != 32u ||
 +	    tx_depth < 2u || rx_depth < 3u) {
-+		printf("SWEET TOUCH: need ABL-loaded SPI firmware and 32-bit FIFOs\n");
++		printf("SWEET TOUCH: FIFO unavailable (proto/fifo/width/depth)\n");
 +		return false;
 +	}
 +	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
