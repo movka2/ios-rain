@@ -13,7 +13,7 @@
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
  #include <sys/systm.h>
-@@ -18,82 +9,98 @@
+@@ -18,82 +9,100 @@
  #include <pexpert/pexpert.h>
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -142,6 +142,8 @@
 +#define FTS_TOUCH_LEN     62u
 +#define FTS_CHIP_ID_H     0xa3u
 +#define FTS_CHIP_ID_L     0x9fu
++#define FTS_REG_POWER     0xa5u
++#define FTS_REG_FW_VER    0xa6u
 +#define FTS_CHIP_ID_H_VAL 0x86u
 +#define FTS_CHIP_ID_L_VAL 0x32u
 +#define FTS_RETRY         3u
@@ -175,7 +177,7 @@
  } st;
  static int touch_sleep_chan;
  
-@@ -134,11 +141,10 @@
+@@ -134,11 +143,10 @@
  	return false;
  }
  
@@ -188,7 +190,7 @@
  }
  
  static void
-@@ -148,7 +154,6 @@
+@@ -148,7 +156,6 @@
  	uint32_t off = TOUCH_GPIO_CFG(pin);
  	uint32_t cfg = touch_rd(tile, off);
  	if (out) {
@@ -196,7 +198,7 @@
  		touch_wr(tile, TOUCH_GPIO_IO(pin),
  		    (touch_rd(tile, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
  	}
-@@ -157,40 +162,91 @@
+@@ -157,40 +164,91 @@
  	touch_wr(tile, off, cfg);
  }
  
@@ -301,7 +303,7 @@
  	touch_wr(st.se, SE_CTRL, 4);
  	for (unsigned i = 0; i < 1000; ++i) {
  		if (touch_rd(st.se, SE_IRQ) & (1u << 4)) {
-@@ -200,7 +256,7 @@
+@@ -200,7 +258,7 @@
  		delay(1);
  	}
  	if (!done) {
@@ -310,7 +312,7 @@
  		for (unsigned i = 0; i < 1000; ++i) {
  			if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
  				done = true;
-@@ -211,21 +267,17 @@
+@@ -211,21 +269,17 @@
  	}
  	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
  		st.dead = true;
@@ -336,7 +338,7 @@
  static uint32_t
  touch_irq(void)
  {
-@@ -234,163 +286,267 @@
+@@ -234,163 +288,278 @@
  	return st.irq_last;
  }
  
@@ -411,10 +413,7 @@
 +			if (count > st.tx_depth) {
 +				err = EIO;
 +				break;
- 			}
--			touch_wr(st.se, SE_TX, word);
--			st.sent = nt;
--			touch_wr(st.se, SE_TX_WM, 0);
++			}
 +			unsigned free = st.tx_depth - count;
 +			while (free-- && tx_sent < tx_words) {
 +				uint32_t word = 0;
@@ -426,13 +425,16 @@
 +				}
 +				touch_wr(st.se, SE_TX, word);
 +				++tx_sent;
-+			}
-+		}
-+		if (err) {
-+			break;
+ 			}
+-			touch_wr(st.se, SE_TX, word);
+-			st.sent = nt;
+-			touch_wr(st.se, SE_TX_WM, 0);
  		}
 -		uint32_t count = touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu;
 -		if (count > 64 || count > (nr - st.got + 3u) / 4u) {
++		if (err) {
++			break;
++		}
 +		uint32_t count = touch_rd(st.se, SE_RX_COUNT) & SE_RX_COUNT_MSK;
 +		if (count > 64) {
  			err = EIO;
@@ -488,16 +490,6 @@
 +		return false;
  	}
 -	return err;
--}
--
--static int
--touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
--{
--	uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
--	int err = touch_msg(addr, wide ? ptr : ptr + 1, wide ? 2u : 1u,
--	    NULL, 0, true);
--	if (err) {
--		return err;
 +	uint16_t crc = 0xffffu;
 +	for (unsigned i = 0; i + 2 < len; ++i) {
 +		crc ^= data[i];
@@ -505,20 +497,21 @@
 +			crc = (crc & 1u) ? (uint16_t)((crc >> 1) ^ 0x8408u) :
 +			    (uint16_t)(crc >> 1);
 +		}
- 	}
--	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
--	return touch_msg(addr, NULL, 0, buf, len, false);
++	}
 +	uint16_t got = (uint16_t)data[len - 2] |
 +	    ((uint16_t)data[len - 1] << 8);
 +	return crc == got;
  }
  
  static int
--touch_goodix_ack(void)
+-touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
 +touch_fts_read(uint8_t reg, uint8_t *data, unsigned n)
  {
--	const uint8_t ack[3] = {GOODIX_EVENT_REG >> 8, GOODIX_EVENT_REG & 0xffu, 0};
--	return touch_msg(0x5d, ack, sizeof(ack), NULL, 0, false);
+-	uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
+-	int err = touch_msg(addr, wide ? ptr : ptr + 1, wide ? 2u : 1u,
+-	    NULL, 0, true);
+-	if (err) {
+-		return err;
 +	uint8_t tx[128], rx[128];
 +	if (n == 0 || n > 110) {
 +		return EINVAL;
@@ -540,16 +533,41 @@
 +			break;
 +		}
 +		delay(1);
-+	}
+ 	}
+-	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
+-	return touch_msg(addr, NULL, 0, buf, len, false);
 +	return EIO;
+ }
+ 
+ static int
+-touch_goodix_ack(void)
++touch_fts_write_reg(uint8_t reg, uint8_t val)
+ {
+-	const uint8_t ack[3] = {GOODIX_EVENT_REG >> 8, GOODIX_EVENT_REG & 0xffu, 0};
+-	return touch_msg(0x5d, ack, sizeof(ack), NULL, 0, false);
++	uint8_t tx[16], rx[16];
++	unsigned len = 8;
++	memset(tx, 0, len);
++	memset(rx, 0, len);
++	tx[0] = reg;
++	tx[1] = 0;
++	tx[2] = 0;
++	tx[3] = 1;
++	tx[7] = val;
++	int err = touch_spi_xfr(tx, len, rx);
++	if (err || (rx[3] & 0xa0u)) {
++		return EIO;
++	}
++	return 0;
  }
  
 -/* Raw read only: 0x8240 is the vendor's generic/older VERSION candidate,
 - * not a second accepted GT9896 identity. Never try a four-byte Berlin pointer:
 - * on this 16-bit IC the extra bytes would be register data writes. */
- static int
+-static int
 -touch_probe_info(uint16_t reg, uint8_t *buf)
-+touch_fts_write_reg(uint8_t reg, uint8_t val)
++static bool
++touch_spi_init(void)
  {
 -	memset(buf, 0xa5, 32);
 -	int err = touch_read(0x5d, reg, true, buf, 32);
@@ -563,29 +581,6 @@
 -			}
 -			printf("SWEET TOUCH: probe raw %#x: %s\n", reg + off, line);
 -		}
-+	uint8_t tx[16], rx[16];
-+	unsigned len = 8;
-+	memset(tx, 0, len);
-+	memset(rx, 0, len);
-+	tx[0] = reg;
-+	tx[1] = 0;
-+	tx[2] = 0;
-+	tx[3] = 1;
-+	tx[7] = val;
-+	int err = touch_spi_xfr(tx, len, rx);
-+	if (err || (rx[3] & 0xa0u)) {
-+		return EIO;
- 	}
--	return err;
-+	return 0;
- }
- 
--static unsigned
--touch_be16(const uint8_t *p)
-+static bool
-+touch_spi_init(void)
- {
--	return ((unsigned)p[0] << 8) | p[1];
 +	uint32_t fw = touch_rd(st.se, SE_FW);
 +	uint32_t tx = touch_rd(st.se, SE_HW_TX), rx = touch_rd(st.se, SE_HW_RX);
 +	st.d_fw = fw;
@@ -610,7 +605,8 @@
 +	    tx_depth < 2u || rx_depth < 3u) {
 +		printf("SWEET TOUCH: need ABL-loaded SPI firmware and 32-bit FIFOs\n");
 +		return false;
-+	}
+ 	}
+-	return err;
 +	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
 +		printf("SWEET TOUCH: SE0 already busy\n");
 +		return false;
@@ -661,16 +657,12 @@
 +	return true;
  }
  
- static bool
--touch_checksum(const uint8_t *buf, unsigned len)
+-static unsigned
+-touch_be16(const uint8_t *p)
++static bool
 +touch_fts_reset(void)
  {
--	if (len < 2) {
--		return false;
--	}
--	unsigned sum = 0;
--	for (unsigned i = 0; i + 2 < len; ++i) {
--		sum += buf[i];
+-	return ((unsigned)p[0] << 8) | p[1];
 +	touch_gpio(TOUCH_PIN_IRQ, 0, 3, 3, false, false);
 +	touch_gpio(TOUCH_PIN_AVDD, 0, 3, 3, true, true);
 +	touch_gpio(TOUCH_PIN_RESET, 0, 3, 3, true, false);
@@ -691,8 +683,7 @@
 +			return true;
 +		}
 +		touch_wait(10);
- 	}
--	return (sum & 0xffffu) == touch_be16(buf + len - 2);
++	}
 +	st.d_idh = idh;
 +	st.d_idl = idl;
 +	st.d_id1 = e1;
@@ -701,8 +692,29 @@
 +	return false;
  }
  
+-static bool
+-touch_checksum(const uint8_t *buf, unsigned len)
++static void
++touch_fts_diag(void)
+ {
+-	if (len < 2) {
+-		return false;
+-	}
+-	unsigned sum = 0;
+-	for (unsigned i = 0; i + 2 < len; ++i) {
+-		sum += buf[i];
+-	}
+-	return (sum & 0xffffu) == touch_be16(buf + len - 2);
++	uint8_t v = 0;
++	int e;
++	e = touch_fts_read(FTS_REG_POWER, &v, 1);
++	printf("SWEET TOUCH: power mode %02x err=%d\n", v, e);
++	e = touch_fts_read(FTS_REG_FW_VER, &v, 1);
++	printf("SWEET TOUCH: fw ver %02x err=%d\n", v, e);
+ }
+ 
  static void
-@@ -401,7 +557,7 @@
+@@ -401,7 +570,7 @@
  		if (mask & bit) {
  			if (!(st.active & bit) || x[id] != st.x[id] || y[id] != st.y[id]) {
  				sweet_hid_touch((int)id, 1, x[id], y[id]);
@@ -711,7 +723,7 @@
  				st.s_lastx = x[id];
  				st.s_lasty = y[id];
  			}
-@@ -409,332 +565,167 @@
+@@ -409,332 +578,168 @@
  			st.y[id] = y[id];
  		} else if (st.active & bit) {
  			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
@@ -1066,6 +1078,7 @@
 +		}
  	}
 -	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
++	touch_fts_diag();
  	st.stage = "polling";
 -	printf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\n",
 -	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);
@@ -1141,7 +1154,7 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,9 +741,19 @@
+@@ -750,9 +755,19 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
@@ -1163,7 +1176,7 @@
  	if (!enabled) {
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
-@@ -764,4 +765,4 @@
+@@ -764,4 +779,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
