@@ -1,56 +1,102 @@
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -739,6 +739,7 @@
+@@ -736,9 +736,46 @@
+ 	}
+ }
+ 
++/*
++ * Bring-up stage indicator: a column of white blocks at the right edge of
++ * the boot framebuffer.  It survives console text and a hung kernel, so a
++ * photo shows the last stage reached even when the console stops updating.
++ */
++#define STAGE_FB_PA   0x5c000000u
++#define STAGE_FB_W    720u
++static volatile uint32_t *stage_fb;
++
++static void
++stage_init(void)
++{
++	if (stage_fb == NULL) {
++		stage_fb = (volatile uint32_t *)ml_io_map(STAGE_FB_PA, 0x100000);
++	}
++}
++
++static void
++stage_mark(unsigned n)
++{
++	stage_init();
++	if (stage_fb == NULL) {
++		return;
++	}
++	for (unsigned i = 0; i < n && i < 20; ++i) {
++		unsigned y0 = 8u + i * 28u;
++		unsigned x0 = STAGE_FB_W - 40u;
++		for (unsigned y = y0; y < y0 + 20u; ++y) {
++			for (unsigned x = x0; x < x0 + 30u; ++x) {
++				stage_fb[y * STAGE_FB_W + x] = 0xffffffffu;
++			}
++		}
++	}
++}
++
  static int
  sweet_ufs_init(void)
  {
++	stage_mark(1);
 +	printf("SWEET UFS: init enter\n");
  	DTEntry node;
  	uintptr_t const *reg = NULL;
  	unsigned int size = 0;
-@@ -761,6 +762,7 @@
+@@ -761,6 +798,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
++	stage_mark(2);
 +	printf("SWEET UFS: regs mapped\n");
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -771,11 +773,14 @@
+@@ -771,11 +810,17 @@
  		return ENOMEM;
  	}
  	su.dma_pa = ptoa_64(pn);
++	stage_mark(3);
 +	printf("SWEET UFS: dma ready\n");
  	su.lun = 0;
  	su.secsize = DEV_BSIZE;
  
++	stage_mark(4);
 +	printf("SWEET UFS: take host\n");
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
++	stage_mark(5);
 +	printf("SWEET UFS: host %d\n", error);
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
  		/* The first command after the bootloader may report a unit attention. */
-@@ -784,6 +789,7 @@
+@@ -784,6 +829,8 @@
  	}
  	if (!error) {
  		error = ufs_find_partition(want);
++		stage_mark(6);
 +		printf("SWEET UFS: find %d\n", error);
  	}
  	lck_mtx_unlock(&sweet_ufs_lock);
  	if (error) {
-@@ -807,6 +813,7 @@
+@@ -807,6 +854,8 @@
  	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
  	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
++	stage_mark(7);
 +	printf("SWEET UFS: log start\n");
  	sweet_log_start();
  	sweet_sample_start();
  	thread_t gpt_thread;
-@@ -821,6 +828,7 @@
+@@ -821,6 +870,8 @@
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
++	stage_mark(8);
 +	printf("SWEET UFS: touch init\n");
  	sweet_touch_init();
  	sweet_keys_init();
