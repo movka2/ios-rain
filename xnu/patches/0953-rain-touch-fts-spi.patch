@@ -588,12 +588,12 @@
 -		return err;
 +	if (st.use_bitbang) {
 +		return touch_spi_xfr_bitbang(tx, n, rx);
++	}
++	if (st.use_dma) {
++		return touch_spi_xfr_dma(tx, n, rx);
  	}
 -	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
 -	return touch_msg(addr, NULL, 0, buf, len, false);
-+	if (st.use_dma) {
-+		return touch_spi_xfr_dma(tx, n, rx);
-+	}
 +	return touch_spi_xfr_fifo(tx, n, rx);
  }
  
@@ -733,7 +733,8 @@
 +	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
 +		printf("SWEET TOUCH: SE0 already busy\n");
 +		return false;
-+	}
+ 	}
+-	return (sum & 0xffffu) == touch_be16(buf + len - 2);
 +	st.tx_depth = tx_depth;
 +	st.rx_depth = rx_depth;
 +	touch_wr(st.se, 0xe18, 0);
@@ -806,8 +807,7 @@
 +			return true;
 +		}
 +		touch_wait(10);
- 	}
--	return (sum & 0xffffu) == touch_be16(buf + len - 2);
++	}
 +	st.d_idh = idh;
 +	st.d_idl = idl;
 +	st.d_id1 = e1;
@@ -1276,10 +1276,10 @@
 +			if ((errors++ % 100u) == 0) {
 +				printf("SWEET TOUCH: report err=%d irq=%#x\n",
 +				    err, st.irq_status);
-+			}
+ 			}
 +			if (errors == 10) {
 +				touch_report(0, st.x, st.y);
- 			}
++			}
 +		} else {
 +			errors = 0;
  		}
@@ -1302,12 +1302,16 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,13 +917,25 @@
+@@ -750,13 +917,29 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
 -	st.irq_hint = 1; /* topaz: read on IRQ GPIO80 low, while touching, else every 100 ms */
 -	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
++	int off = 0;
++	if (PE_parse_boot_argn("sweettou", &off, sizeof(off))) {
++		enabled = !off;
++	}
  	(void)PE_parse_boot_argn("sweettouchdiag", &st.diag, sizeof(st.diag));
 +	int bb = 0;
 +	if (PE_parse_boot_argn("sweettouchbitbang", &bb, sizeof(bb)) && bb) {
@@ -1330,7 +1334,7 @@
  	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
  	if (kr == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -764,4 +943,4 @@
+@@ -764,4 +947,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
