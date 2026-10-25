@@ -733,8 +733,7 @@
 +	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
 +		printf("SWEET TOUCH: SE0 already busy\n");
 +		return false;
- 	}
--	return (sum & 0xffffu) == touch_be16(buf + len - 2);
++	}
 +	st.tx_depth = tx_depth;
 +	st.rx_depth = rx_depth;
 +	touch_wr(st.se, 0xe18, 0);
@@ -807,7 +806,8 @@
 +			return true;
 +		}
 +		touch_wait(10);
-+	}
+ 	}
+-	return (sum & 0xffffu) == touch_be16(buf + len - 2);
 +	st.d_idh = idh;
 +	st.d_idl = idl;
 +	st.d_id1 = e1;
@@ -826,7 +826,7 @@
  				st.s_lastx = x[id];
  				st.s_lasty = y[id];
  			}
-@@ -409,332 +685,223 @@
+@@ -409,332 +685,229 @@
  			st.y[id] = y[id];
  		} else if (st.active & bit) {
  			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
@@ -1108,6 +1108,7 @@
 -	touch_wait(delay_s * 1000u);
 -	st.stage = "map";
 -	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
+-	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
 +	(void)PE_parse_boot_argn("sweettouchdelay", &start_delay, sizeof(start_delay));
 +	st.stage = "wait";
 +	printf("SWEET TOUCH: rain FTS SPI starting in %u s\n", start_delay);
@@ -1115,45 +1116,51 @@
 +		touch_wait(start_delay * 1000u);
 +	}
 +	printf("SWEET TOUCH: wait done\n");
-+	st.stage = "map gcc";
- 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
-+	printf("SWEET TOUCH: map gcc=%#lx\n", (unsigned long)st.gcc);
 +	st.stage = "map west";
  	st.west = ml_io_map(TOUCH_WEST_PA, 0x58000);
 -	st.east = ml_io_map(TOUCH_EAST_PA, 0x25000);
+-	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
+-	if (!st.gcc || !st.west || !st.east || !st.se) {
 +	printf("SWEET TOUCH: map west=%#lx\n", (unsigned long)st.west);
 +	st.stage = "map south";
 +	st.south = ml_io_map(TOUCH_SOUTH_PA, 0x80000);
 +	printf("SWEET TOUCH: map south=%#lx\n", (unsigned long)st.south);
-+	st.stage = "map se";
- 	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
--	if (!st.gcc || !st.west || !st.east || !st.se) {
-+	printf("SWEET TOUCH: map se=%#lx\n", (unsigned long)st.se);
-+	if (!st.gcc || !st.west || !st.south || !st.se) {
++	if (!st.west || !st.south) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
  	}
 -	st.stage = "clocks";
 -	if (!touch_clocks()) {
-+	st.stage = "dma";
-+	if (kmem_alloc_contig(kernel_map, &st.dma, SE_DMA_SIZE, PAGE_MASK, 0, 0,
-+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		printf("SWEET TOUCH: no contiguous DMA memory\n");
- 		goto out;
+-		goto out;
++	if (!st.use_bitbang) {
++		st.stage = "map gcc";
++		st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
++		printf("SWEET TOUCH: map gcc=%#lx\n", (unsigned long)st.gcc);
++		st.stage = "map se";
++		st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
++		printf("SWEET TOUCH: map se=%#lx\n", (unsigned long)st.se);
++		if (!st.gcc || !st.se) {
++			printf("SWEET TOUCH: MMIO mapping failed\n");
++			goto out;
++		}
++		st.stage = "dma";
++		if (kmem_alloc_contig(kernel_map, &st.dma, SE_DMA_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++			printf("SWEET TOUCH: no contiguous DMA memory\n");
++			goto out;
++		}
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
++		if (!pn) {
++			printf("SWEET TOUCH: DMA page not mapped\n");
++			goto out;
++		}
++		st.dma_pa = ptoa_64(pn);
++		printf("SWEET TOUCH: dma va=%#lx pa=%#llx\n", (unsigned long)st.dma,
++		    (unsigned long long)st.dma_pa);
  	}
 -	st.stage = "se2 init";
 -	if (!touch_se_init()) {
-+	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
-+	if (!pn) {
-+		printf("SWEET TOUCH: DMA page not mapped\n");
- 		goto out;
- 	}
--	st.stage = "power/reset";
--	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x avdd=%#x\n",
--	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_RESET)),
-+	st.dma_pa = ptoa_64(pn);
-+	printf("SWEET TOUCH: dma va=%#lx pa=%#llx\n", (unsigned long)st.dma,
-+	    (unsigned long long)st.dma_pa);
+-		goto out;
 +	st.stage = "clocks";
 +	if (st.use_bitbang) {
 +		st.stage = "bb pins";
@@ -1175,7 +1182,10 @@
 +		for (unsigned pin = 0; pin <= 3; ++pin) {
 +			touch_gpio(pin, 1, 0, 2, false, false);
 +		}
-+	}
+ 	}
+-	st.stage = "power/reset";
+-	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x avdd=%#x\n",
+-	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_RESET)),
 +	printf("SWEET TOUCH: pins irq=%#x reset=%#x avdd=%#x\n",
  	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_IRQ)),
 -	    touch_rd(st.east, TOUCH_GPIO_IO(TOUCH_PIN_AVDD)));
@@ -1302,7 +1312,7 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,13 +917,29 @@
+@@ -750,13 +923,29 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
@@ -1334,7 +1344,7 @@
  	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
  	if (kr == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -764,4 +947,4 @@
+@@ -764,4 +953,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
