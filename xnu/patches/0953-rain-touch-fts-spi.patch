@@ -899,7 +899,7 @@
 +	if (secs) {
 +		unsigned frames = st.s_frames;
 +		printf("SWEET TOUCH: watchdog %u s\n", secs);
-+		delay(secs * 1000000u);
++		touch_wait(secs * 1000u);
 +		if (st.s_frames == frames) {
 +			panic("SWEET TOUCH watchdog: stage='%s' frames=%u dead=%d | "
 +			    "vote=%#x cfg=%#x cbcr=%#x | fw=%#x status=%#x ifd=%#x | "
