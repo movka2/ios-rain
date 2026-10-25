@@ -291,7 +291,7 @@
  		for (unsigned i = 0; i < 1000; ++i) {
  			if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
  				done = true;
-@@ -211,21 +248,17 @@
+@@ -211,21 +248,19 @@
  	}
  	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
  		st.dead = true;
@@ -302,11 +302,12 @@
 -	/* Bound drain even if the hardware reports an impossible FIFO count. */
 -	for (unsigned i = 0; i < 64 && (touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
 -		(void)touch_rd(st.se, SE_RX);
--	}
-+	touch_drain_rx();
++	if (!st.use_dma) {
++		touch_drain_rx();
+ 	}
  	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
 -	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
-+	if (touch_rd(st.se, SE_TX_COUNT) & SE_TX_COUNT_MSK) {
++	if (!st.use_dma && (touch_rd(st.se, SE_TX_COUNT) & SE_TX_COUNT_MSK)) {
  		st.dead = true;
 -		printf("SWEET TOUCH: TX FIFO not empty after abort; stopping\n");
 +		printf("SWEET TOUCH: TX FIFO not empty after abort\n");
@@ -317,7 +318,7 @@
  static uint32_t
  touch_irq(void)
  {
-@@ -234,163 +267,348 @@
+@@ -234,163 +269,349 @@
  	return st.irq_last;
  }
  
@@ -674,8 +675,7 @@
 +	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
 +		printf("SWEET TOUCH: SE0 already busy\n");
 +		return false;
- 	}
--	return (sum & 0xffffu) == touch_be16(buf + len - 2);
++	}
 +	st.tx_depth = tx_depth;
 +	st.rx_depth = rx_depth;
 +	touch_wr(st.se, 0xe18, 0);
@@ -706,19 +706,20 @@
 +	touch_wr(st.se, 0x264, SE_PACK1);
 +	touch_wr(st.se, 0x284, SE_PACK0);
 +	touch_wr(st.se, 0x288, SE_PACK1);
-+	touch_wr(st.se, SE_TX_WM, 1);
-+	touch_wr(st.se, SE_RX_WM, rx_depth - 3u);
-+	touch_wr(st.se, SE_RX_RFR, rx_depth - 2u);
 +	touch_wr(st.se, SE_IRQ_EN, SE_EVENTS);
-+	if (touch_rd(st.se, SE_TX_COUNT) & SE_TX_COUNT_MSK) {
-+		printf("SWEET TOUCH: inherited TX FIFO data\n");
-+		return false;
++	if (!st.use_dma) {
++		touch_wr(st.se, SE_TX_WM, 1);
++		touch_wr(st.se, SE_RX_WM, rx_depth - 3u);
++		touch_wr(st.se, SE_RX_RFR, rx_depth - 2u);
++		if (touch_rd(st.se, SE_TX_COUNT) & SE_TX_COUNT_MSK) {
++			printf("SWEET TOUCH: inherited TX FIFO data\n");
++			return false;
++		}
++		touch_drain_rx();
 +	}
-+	touch_drain_rx();
-+	printf("SWEET TOUCH: SPI mode0 wordlen=%#x pack=%#x/%#x wm=%u/%u\n",
++	printf("SWEET TOUCH: SPI mode0 wordlen=%#x pack=%#x/%#x dma=%d\n",
 +	    touch_rd(st.se, SE_SPI_WORD_LEN), touch_rd(st.se, 0x260),
-+	    touch_rd(st.se, 0x284), touch_rd(st.se, SE_RX_WM),
-+	    touch_rd(st.se, SE_RX_RFR));
++	    touch_rd(st.se, 0x284), st.use_dma);
 +	return true;
 +}
 +
@@ -747,7 +748,8 @@
 +			return true;
 +		}
 +		touch_wait(10);
-+	}
+ 	}
+-	return (sum & 0xffffu) == touch_be16(buf + len - 2);
 +	st.d_idh = idh;
 +	st.d_idl = idl;
 +	st.d_id1 = e1;
@@ -757,7 +759,7 @@
  }
  
  static void
-@@ -401,7 +619,7 @@
+@@ -401,7 +622,7 @@
  		if (mask & bit) {
  			if (!(st.active & bit) || x[id] != st.x[id] || y[id] != st.y[id]) {
  				sweet_hid_touch((int)id, 1, x[id], y[id]);
@@ -766,7 +768,7 @@
  				st.s_lastx = x[id];
  				st.s_lasty = y[id];
  			}
-@@ -409,332 +627,213 @@
+@@ -409,332 +630,213 @@
  			st.y[id] = y[id];
  		} else if (st.active & bit) {
  			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
@@ -1230,7 +1232,7 @@
  	}
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -750,13 +849,21 @@
+@@ -750,13 +852,21 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
@@ -1254,7 +1256,7 @@
  	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
  	if (kr == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -764,4 +871,4 @@
+@@ -764,4 +874,4 @@
  		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
  	}
  }
