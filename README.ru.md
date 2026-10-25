@@ -24,7 +24,7 @@
 | Дисплей | Панель `ft8006s` 720×1650 DSI; для iOS выглядит как нативный iPhone X 1125×2436 @3x (375×812 точек), масштабируется в 762×1650 с обрезкой 21 px по бокам и без полей |
 | Яркость | DBV панели `0x7ff` при загрузке для bring-up; интеграция CoreBrightness ещё впереди |
 | GUI | `backboardd` и `SpringBoard`; экран блокировки iOS 16 с идущими часами |
-| Тач | Драйвер FocalTech FTS SPI написан (`0953-rain-touch-fts-spi.patch`); ждёт CI и проверки на железе. В текущем boot-образе всё ещё `sweettouch=0` |
+| Тач | Драйвер FocalTech FTS SPI написан (`0953-rain-touch-fts-spi.patch`); ждёт CI и проверки на железе. В текущем boot-образе тач ещё выключен (`sweettouch=0`) |
 | GPU | Аппаратного ускорения нет; кадры собираются на CPU при 30 Гц |
 | RTC | Драйвера нет, дата начинается с 31 декабря |
 | Аудио, Wi-Fi, сотовая связь, камера, датчики | Не портированы |
@@ -98,7 +98,7 @@ python3 tools/mkadt.py shim/out/rain.adt --rain
 
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet \
     shim/out/rain.adt shim/out/payload-rain-debug.bin \
-    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=1'
+    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouchch=1'
 
 MKBOOTIMG=/usr/share/android-tools/mkbootimg/mkbootimg.py \
     shim/build.sh ../shim/out/payload-rain-debug.bin
@@ -121,8 +121,10 @@ fastboot boot shim/out/shim-boot-rain-debug.img
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Корень на `userdata`, чтение/запись |
 | `cpus=4` | Все четыре ядра A73; `cpus=1` — безопасный fallback |
 | `sweetfb_hz=30` | Частота копирования кадров на CPU |
-| `sweettouch=1` | Включить FTS SPI драйвер тача (по умолчанию; текущий тестовый образ ставит `0`) |
+| `sweettouch` | Включить FTS SPI драйвер тача (по умолчанию; `sweettouch=0` выключает) |
 | `sweettouchdelay=45` | Задержка перед запуском тача в секундах (по умолчанию 45) |
+| `sweettouchdma=1` | Принудительно использовать GENI SE DMA (авто при `FIFO_IF_DISABLE`) |
+| `sweettouchwatchdog=30` | Panic через N секунд без touch-down (для bring-up) |
 | `sweettouchdiag=1` | Диагностика тача и panic при выходе; `2` — ещё и panic после 3000 кадров |
 | `sweetfb_native=1` | Показать сырую панель 720×1650 вместо дисплея 375×812 точек (только отладка; красная плашка UIKit возвращается) |
 | `sweetfb_noconsole=1` | Перестать рисовать текст ядра после первого кадра iOS; не указывайте при отладке |

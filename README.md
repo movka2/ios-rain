@@ -24,7 +24,7 @@ This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), whi
 | Display | 720×1650 `ft8006s` DSI panel; presented as the native iPhone X 1125×2436 @3x (375×812 points), scaled to 762×1650 with a 21 px side crop and no letterbox |
 | Brightness | Panel DBV set to `0x7ff` at boot for bring-up; CoreBrightness integration is still to come |
 | GUI | `backboardd` and `SpringBoard`; iOS 16 lock screen with a running clock |
-| Touch | FocalTech FTS SPI driver written (`0953-rain-touch-fts-spi.patch`); waiting for kernel CI and hardware test. The current boot image still uses `sweettouch=0` |
+| Touch | FocalTech FTS SPI driver written (`0953-rain-touch-fts-spi.patch`); waiting for kernel CI and hardware test. The current boot image has touch disabled (`sweettouch=0`) |
 | GPU | No hardware acceleration; frames are composed on the CPU at 30 Hz |
 | RTC | No driver yet, so the date starts at 31 December |
 | Audio, Wi-Fi, cellular, camera, sensors | Not ported |
@@ -98,7 +98,7 @@ python3 tools/mkadt.py shim/out/rain.adt --rain
 
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet \
     shim/out/rain.adt shim/out/payload-rain-debug.bin \
-    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch=1'
+    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouchch=1'
 
 MKBOOTIMG=/usr/share/android-tools/mkbootimg/mkbootimg.py \
     shim/build.sh ../shim/out/payload-rain-debug.bin
@@ -121,8 +121,10 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Root on `userdata`, writable |
 | `cpus=4` | All four A73 cores; `cpus=1` is the safe fallback |
 | `sweetfb_hz=30` | CPU frame-copy rate |
-| `sweettouch=1` | Enable the FTS SPI touch driver (default; the current test image sets `0`) |
+| `sweettouch` | Enable the FTS SPI touch driver (default; `sweettouch=0` disables) |
 | `sweettouchdelay=45` | Seconds to wait before probing touch (default 45) |
+| `sweettouchdma=1` | Force the GENI SE DMA path (auto when FIFO_IF_DISABLE is set) |
+| `sweettouchwatchdog=30` | Panic after N seconds if no touch-down was reported (bring-up) |
 | `sweettouchdiag=1` | Dump touch diagnostics and panic on exit; `2` also panics after 3000 frames |
 | `sweetfb_native=1` | Present the raw 720×1650 panel instead of the 375×812-point display (debugging only; the red UIKit status bar returns) |
 | `sweetfb_noconsole=1` | Stop drawing kernel text after the first iOS frame; omit it while debugging |
