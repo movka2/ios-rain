@@ -68,6 +68,8 @@ The FT8006S has no application firmware in flash: it starts in ROM boot mode and
 
 ## Build it yourself
 
+If you only want to boot, download a boot image from [Releases](https://github.com/movka2/ios-rain/releases); it already includes the FTS firmware. You still need the iOS root image from step 2.
+
 You need an unlocked Redmi 10C, a Linux PC with `fastboot`, a GitHub account for the kernel build, and the iPhone X iOS 16.7.16 IPSW. **Everything in `userdata` is erased.** Nothing is written to boot, vendor_boot, modem, persist or the partition table.
 
 ### 1. Kernel
