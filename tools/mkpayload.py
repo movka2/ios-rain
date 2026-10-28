@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack an xnu kernel Mach-O + ADT into the payload the sweet shim boots.
 
-  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE]
+  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE] [--blob IMAGE]
 
 The kernel is linked as a PIE with LC_DYLD_CHAINED_FIXUPS. Nobody else
 (no kmutil, no iBoot) resolves those for us, and xnu only rebases static
@@ -25,6 +25,10 @@ kernel_end past it, so the shim needs no changes: the image lands below the
 ADT and boot_args, inside topOfKernelData (never handed to the VM), and the
 ADT gets /chosen/memory-map "RAMDisk" = <phys, size> for IOFindBSDRoot to
 turn into md0 (boot with rd=md0).
+
+--blob appends an arbitrary image the same way and adds
+sweetfw=<phys> sweetfwlen=<size> to the kernel command line, for drivers that
+need a firmware file before the root filesystem is available.
 """
 import argparse, os, struct, sys
 
@@ -140,7 +144,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, blob_path=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -168,6 +172,17 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         adt_blob = add_ramdisk_to_adt(adt_blob, rd_pa, rd_size)
         ramdisk = (hex(rd_pa), hex(rd_size))
 
+    blob = None
+    if blob_path:
+        image = open(blob_path, 'rb').read()
+        blob_size = (len(image) + PAGE - 1) & ~(PAGE - 1)
+        blob_va = kernel_end
+        kernel_end = blob_va + blob_size
+        blob_pa = blob_va - virt_base + PHYS_BASE
+        pieces.append((blob_va, blob_size, image))
+        cmdline += f' sweetfw={hex(blob_pa)} sweetfwlen={hex(len(image))}'
+        blob = (hex(blob_pa), hex(len(image)))
+
     hdr_size = SEG_TABLE + 32 * len(pieces)
     out = bytearray(hdr_size)
     seg_table = []
@@ -188,7 +203,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     for i, t in enumerate(seg_table):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
-                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
+                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, blob=blob,
+                size=len(out),
                 segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
     return bytes(out), info
 
@@ -198,8 +214,9 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--blob', help='image passed to the kernel as sweetfw=<phys>,sweetfwlen=<size>')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.blob)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

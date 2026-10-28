@@ -1,0 +1,358 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -88,9 +88,29 @@
+ #define FTS_CHIP_ID_L_VAL 0x32u
+ #define FTS_RETRY         3u
+ 
++#define FTS_CMD_START1    0x55u
++#define FTS_CMD_READ_ID   0x90u
++#define FTS_ROMBOOT_CMD_SET_PRAM_ADDR 0xadu
++#define FTS_ROMBOOT_CMD_WRITE         0xaeu
++#define FTS_ROMBOOT_CMD_START_APP     0x08u
++#define FTS_ROMBOOT_CMD_ECC           0xccu
++#define FTS_ROMBOOT_CMD_ECC_FINISH    0xceu
++#define FTS_ROMBOOT_CMD_ECC_READ      0xcdu
++#define FTS_APP_INFO_OFFSET 0x100u
++#define FTS_FW_CHUNK      96u
++#define FTS_ECC_OK        0xa5u
++#define FTS_FW_MIN_LEN    0x120u
++#define FTS_FW_MAX_LEN    0x20000u
++#define FTS_BOOT_LOOP     30u
++#define FTS_BOOT_ID_TRIES 3u
++
+ static struct {
+ 	vm_offset_t se, gcc, west, south;
+ 	bool started, dead, use_bitbang, nors;
++	bool fw_loaded, force_fw;
++	uint64_t fw_pa;
++	vm_offset_t fw;
++	unsigned fw_len;
+ 	int diag;
+ 	const char *stage;
+ 	uint32_t irq_status, irq_last;
+@@ -423,22 +443,44 @@
+ }
+ 
+ static int
+-touch_fts_write_reg(uint8_t reg, uint8_t val)
++touch_fts_write(const uint8_t *cmd, unsigned n)
+ {
+-	uint8_t tx[16], rx[16];
+-	unsigned len = 8;
+-	memset(tx, 0, len);
+-	memset(rx, 0, len);
+-	tx[0] = reg;
+-	tx[1] = 0;
+-	tx[2] = 0;
+-	tx[3] = 1;
+-	tx[7] = val;
+-	int err = touch_spi_xfr(tx, len, rx);
+-	if (err || (rx[3] & 0xa0u)) {
+-		return EIO;
++	uint8_t tx[128], rx[128];
++	if (n == 0 || n > 120) {
++		return EINVAL;
+ 	}
+-	return 0;
++	unsigned datalen = n - 1u;
++	unsigned len = 4u + (datalen ? 3u + datalen : 0u);
++	if (len > sizeof(tx)) {
++		return EINVAL;
++	}
++	for (unsigned attempt = 0; attempt < FTS_RETRY; ++attempt) {
++		memset(tx, 0, len);
++		memset(rx, 0, len);
++		tx[0] = cmd[0];
++		tx[1] = 0;
++		tx[2] = (uint8_t)(datalen >> 8);
++		tx[3] = (uint8_t)datalen;
++		if (datalen) {
++			memcpy(tx + 7, cmd + 1, datalen);
++		}
++		int err = touch_spi_xfr(tx, len, rx);
++		if (!err && !(rx[3] & 0xa0u)) {
++			return 0;
++		}
++		if (st.dead) {
++			break;
++		}
++		delay(1);
++	}
++	return EIO;
++}
++
++static int
++touch_fts_write_reg(uint8_t reg, uint8_t val)
++{
++	uint8_t cmd[2] = { reg, val };
++	return touch_fts_write(cmd, 2);
+ }
+ 
+ static bool
+@@ -551,6 +593,209 @@
+ 	return false;
+ }
+ 
++static bool
++touch_fts_fw_valid(vm_offset_t fw, unsigned len)
++{
++	if (!fw || len < FTS_FW_MIN_LEN || len > FTS_FW_MAX_LEN) {
++		return false;
++	}
++	volatile uint8_t *p = (volatile uint8_t *)fw;
++	unsigned code_len = ((unsigned)p[FTS_APP_INFO_OFFSET] << 8) |
++	    p[FTS_APP_INFO_OFFSET + 1];
++	unsigned code_len_n = ((unsigned)p[FTS_APP_INFO_OFFSET + 2] << 8) |
++	    p[FTS_APP_INFO_OFFSET + 3];
++	if ((code_len + code_len_n) != 0xffffu ||
++	    code_len < FTS_FW_MIN_LEN || code_len > len) {
++		return false;
++	}
++	return true;
++}
++
++static void
++touch_fts_reset_to_boot(void)
++{
++	touch_gpio(TOUCH_PIN_IRQ, 0, 3, 3, false, false);
++	touch_gpio(TOUCH_PIN_AVDD, 0, 3, 3, true, true);
++	touch_gpio(TOUCH_PIN_RESET, 0, 3, 3, true, false);
++	touch_wait(1);
++	touch_gpio(TOUCH_PIN_RESET, 0, 3, 3, true, true);
++}
++
++static bool
++touch_fts_boot_id(void)
++{
++	uint8_t id[2] = { 0, 0 };
++	int err = touch_fts_read(FTS_CMD_READ_ID, id, 2);
++	if (!err &&
++	    ((id[0] == 0x86u && (id[1] == 0x32u || id[1] == 0x42u)) ||
++	    (id[0] == 0xf0u && id[1] == 0xc6u))) {
++		return true;
++	}
++	printf("SWEET TOUCH: boot id %02x:%02x err=%d\n", id[0], id[1], err);
++	return false;
++}
++
++static bool
++touch_fts_enter_boot(void)
++{
++	for (unsigned i = 0; i < FTS_BOOT_LOOP; ++i) {
++		touch_fts_reset_to_boot();
++		touch_wait(12);
++		for (unsigned j = 0; j < FTS_BOOT_ID_TRIES; ++j) {
++			uint8_t cmd = FTS_CMD_START1;
++			if (!touch_fts_write(&cmd, 1)) {
++				touch_wait(12);
++				if (touch_fts_boot_id()) {
++					printf("SWEET TOUCH: fw boot id pass (retry %u)\n", i);
++					return true;
++				}
++			}
++			if (st.dead) {
++				return false;
++			}
++		}
++	}
++	printf("SWEET TOUCH: fw enter boot failed\n");
++	return false;
++}
++
++static bool
++touch_fts_pram_write(vm_offset_t fw, unsigned len)
++{
++	volatile uint8_t *src = (volatile uint8_t *)fw;
++	uint8_t cmd[4];
++	uint8_t buf[1 + FTS_FW_CHUNK];
++	unsigned chunks = (len + FTS_FW_CHUNK - 1u) / FTS_FW_CHUNK;
++
++	printf("SWEET TOUCH: fw pram write %u bytes, %u chunks\n", len, chunks);
++	for (unsigned off = 0; off < len; off += FTS_FW_CHUNK) {
++		unsigned n = len - off;
++		if (n > FTS_FW_CHUNK) {
++			n = FTS_FW_CHUNK;
++		}
++		cmd[0] = FTS_ROMBOOT_CMD_SET_PRAM_ADDR;
++		cmd[1] = (uint8_t)(off >> 16);
++		cmd[2] = (uint8_t)(off >> 8);
++		cmd[3] = (uint8_t)off;
++		if (touch_fts_write(cmd, sizeof(cmd))) {
++			printf("SWEET TOUCH: fw set pram addr %u failed\n", off);
++			return false;
++		}
++		buf[0] = FTS_ROMBOOT_CMD_WRITE;
++		for (unsigned j = 0; j < n; ++j) {
++			buf[1 + j] = src[off + j];
++		}
++		if (touch_fts_write(buf, n + 1u)) {
++			printf("SWEET TOUCH: fw write chunk %u failed\n", off / FTS_FW_CHUNK);
++			return false;
++		}
++	}
++	return true;
++}
++
++static uint16_t
++touch_fts_ecc(vm_offset_t fw, unsigned len)
++{
++	volatile uint8_t *p = (volatile uint8_t *)fw;
++	uint16_t ecc = 0;
++	for (unsigned i = 0; i + 1 < len; i += 2) {
++		ecc ^= (uint16_t)(((uint16_t)p[i] << 8) | p[i + 1]);
++		for (unsigned j = 0; j < 16; ++j) {
++			ecc = (ecc & 1u) ? (uint16_t)((ecc >> 1) ^ 0x8408u) :
++			    (uint16_t)(ecc >> 1);
++		}
++	}
++	return ecc;
++}
++
++static bool
++touch_fts_ecc_tp(unsigned saddr, unsigned len, uint16_t *out)
++{
++	uint8_t cmd[7] = {
++		FTS_ROMBOOT_CMD_ECC,
++		(uint8_t)(saddr >> 16), (uint8_t)(saddr >> 8), (uint8_t)saddr,
++		(uint8_t)(len >> 16), (uint8_t)(len >> 8), (uint8_t)len
++	};
++	if (touch_fts_write(cmd, sizeof(cmd))) {
++		printf("SWEET TOUCH: fw ecc cmd failed\n");
++		return false;
++	}
++	touch_wait(2);
++	uint8_t v = 0;
++	unsigned i;
++	for (i = 0; i < 100; ++i) {
++		if (!touch_fts_read(FTS_ROMBOOT_CMD_ECC_FINISH, &v, 1) &&
++		    v == FTS_ECC_OK) {
++			break;
++		}
++		touch_wait(1);
++	}
++	if (i >= 100) {
++		printf("SWEET TOUCH: fw ecc finish timeout %02x\n", v);
++		return false;
++	}
++	uint8_t e[2] = { 0, 0 };
++	if (touch_fts_read(FTS_ROMBOOT_CMD_ECC_READ, e, 2)) {
++		printf("SWEET TOUCH: fw ecc read failed\n");
++		return false;
++	}
++	*out = (uint16_t)(((uint16_t)e[0] << 8) | e[1]);
++	return true;
++}
++
++static bool
++touch_fts_upload(vm_offset_t fw, unsigned len)
++{
++	volatile uint8_t *p = (volatile uint8_t *)fw;
++	unsigned code_len = ((unsigned)p[FTS_APP_INFO_OFFSET] << 8) |
++	    p[FTS_APP_INFO_OFFSET + 1];
++
++	if (!touch_fts_fw_valid(fw, len)) {
++		printf("SWEET TOUCH: fw header invalid\n");
++		return false;
++	}
++	printf("SWEET TOUCH: fw upload len=%u app=%u\n", len, code_len);
++	if (!touch_fts_enter_boot()) {
++		return false;
++	}
++	if (!touch_fts_pram_write(fw, code_len)) {
++		return false;
++	}
++	uint16_t host = touch_fts_ecc(fw, code_len);
++	uint16_t tp = 0;
++	if (!touch_fts_ecc_tp(0, code_len, &tp)) {
++		return false;
++	}
++	printf("SWEET TOUCH: fw ecc host=%04x tp=%04x\n", host, tp);
++	if (host != tp) {
++		printf("SWEET TOUCH: fw ecc mismatch\n");
++		return false;
++	}
++	uint8_t cmd = FTS_ROMBOOT_CMD_START_APP;
++	if (touch_fts_write(&cmd, 1)) {
++		printf("SWEET TOUCH: fw start app failed\n");
++		return false;
++	}
++	touch_wait(100);
++	for (unsigned i = 0; i < 50; ++i) {
++		uint8_t idh = 0, idl = 0;
++		int e1 = touch_fts_read(FTS_CHIP_ID_H, &idh, 1);
++		int e2 = touch_fts_read(FTS_CHIP_ID_L, &idl, 1);
++		if (!e1 && !e2 && idh == FTS_CHIP_ID_H_VAL &&
++		    (idl == FTS_CHIP_ID_L_VAL || idl == 0x42u)) {
++			st.d_idh = idh;
++			st.d_idl = idl;
++			st.d_id1 = e1;
++			st.d_id2 = e2;
++			printf("SWEET TOUCH: fw running id %02x:%02x\n", idh, idl);
++			return true;
++		}
++		touch_wait(10);
++	}
++	printf("SWEET TOUCH: fw start verify failed\n");
++	return false;
++}
++
+ static void
+ touch_fts_diag(void)
+ {
+@@ -691,13 +936,35 @@
+ 	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_IRQ)),
+ 	    touch_rd(st.west, TOUCH_GPIO_IO(TOUCH_PIN_RESET)),
+ 	    touch_rd(st.south, TOUCH_GPIO_IO(TOUCH_PIN_AVDD)));
++	if (st.fw_pa) {
++		st.stage = "fts fw map";
++		st.fw = ml_io_map((vm_offset_t)st.fw_pa, st.fw_len);
++		if (!st.fw) {
++			printf("SWEET TOUCH: fw map failed\n");
++			goto out;
++		}
++		printf("SWEET TOUCH: fw mapped pa=%#llx len=%u\n",
++		    (unsigned long long)st.fw_pa, st.fw_len);
++	}
+ 	if (st.nors) {
+ 		printf("SWEET TOUCH: skipping reset (sweettouchnoreset)\n");
+ 	} else {
+ 		st.stage = "fts reset";
+-		if (!touch_fts_reset()) {
++		st.fw_loaded = touch_fts_reset();
++		if (!st.fw_loaded) {
++			printf("SWEET TOUCH: no running app firmware\n");
++		}
++	}
++	if (st.fw && (st.force_fw || !st.fw_loaded)) {
++		st.stage = "fts fw upload";
++		if (!touch_fts_upload(st.fw, st.fw_len)) {
+ 			goto out;
+ 		}
++		st.fw_loaded = true;
++	}
++	if (!st.fw_loaded && !st.nors) {
++		printf("SWEET TOUCH: FTS has no firmware\n");
++		goto out;
+ 	}
+ 	touch_fts_diag();
+ 	st.stage = "polling";
+@@ -768,6 +1035,19 @@
+ 	if (PE_parse_boot_argn("sweettouchnoreset", &nors, sizeof(nors)) && nors) {
+ 		st.nors = true;
+ 	}
++	uint64_t fw_pa = 0;
++	unsigned fw_len = 0;
++	if (PE_parse_boot_argn("sweetfw", &fw_pa, sizeof(fw_pa)) &&
++	    PE_parse_boot_argn("sweetfwlen", &fw_len, sizeof(fw_len)) &&
++	    fw_pa && fw_len) {
++		st.fw_pa = fw_pa;
++		st.fw_len = fw_len;
++	}
++	int force_fw = 0;
++	if (PE_parse_boot_argn("sweettouchfw", &force_fw, sizeof(force_fw)) &&
++	    force_fw) {
++		st.force_fw = true;
++	}
+ 	if (!enabled) {
+ 		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
+ 		return;
