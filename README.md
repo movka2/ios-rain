@@ -8,7 +8,7 @@
 
 </div>
 
-> **2026-10-24: first light.** XNU reaches UFS, mounts the HFS+ iOS root, starts `launchd`, `backboardd` and `SpringBoard`, and draws the iOS 16 lock screen at the native iPhone X size. The clock advances. The FocalTech SPI touch driver is written but not yet built or tested, so this is still a bring-up demo.
+> **2026-10-28: touch works.** XNU boots the iPhone X 16.7.16 userland, `SpringBoard` and apps run, and the FocalTech FT8006S touch works after a bit-bang SPI firmware upload on every cold boot. The display is presented as iPhone X 1125×2436 @3x and stretched to the 720×1650 panel, so nothing is cropped. The vendor firmware is not distributed here; see [Touch firmware](#touch-firmware).
 
 This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), which brought the iPhone X userland to the Redmi Note 12 4G. The original topaz README, including the full engineering history of the XNU port, is preserved as [README.topaz.md](README.topaz.md).
 
@@ -21,10 +21,10 @@ This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), whi
 | Memory | 1.75 GiB at `0x80000000`, below the firmware carve-out |
 | Storage | UFS host driver; iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone X 16.7.16 (20H392) root and shared cache; `launchd` and system daemons run |
-| Display | 720×1650 `ft8006s` DSI panel; presented as the native iPhone X 1125×2436 @3x (375×812 points), scaled to 762×1650 with a 21 px side crop and no letterbox |
+| Display | 720×1650 `ft8006s` DSI panel; presented as the native iPhone X 1125×2436 @3x (375×812 points), stretched to 720×1650 (full width, ~6% horizontal squeeze) |
 | Brightness | Panel DBV set to `0x7ff` at boot for bring-up; CoreBrightness integration is still to come |
-| GUI | `backboardd` and `SpringBoard`; iOS 16 lock screen with a running clock |
-| Touch | FocalTech FTS SPI driver written (`0953-rain-touch-fts-spi.patch`); waiting for kernel CI and hardware test. The current boot image has touch disabled (`sweettouch=0`) |
+| GUI | `backboardd` and `SpringBoard`; lock screen, home screen and apps |
+| Touch | FocalTech FT8006S over GPIO bit-bang SPI; firmware uploaded on every cold boot (`0954`). Multi-touch, gestures, sleep/wake and charger tested |
 | GPU | No hardware acceleration; frames are composed on the CPU at 30 Hz |
 | RTC | No driver yet, so the date starts at 31 December |
 | Audio, Wi-Fi, cellular, camera, sensors | Not ported |
@@ -62,6 +62,10 @@ Xiaomi ABL (stock, unlocked)
 
 There is no serial console. The shim and kernel draw their console into the framebuffer left by ABL. The kernel also keeps a persistent log ring at the end of `userdata`.
 
+## Touch firmware
+
+The FT8006S has no application firmware in flash: it starts in ROM boot mode and the driver uploads the 128 KiB image over SPI on every cold boot. That image is proprietary and is not in this repository or its public releases. Extract it from your own phone (the vendor firmware used by the stock FTS driver) and pass it to the payload builder with `--blob`; without it the display works but touch does not. The working boot images are kept as private draft releases.
+
 ## Build it yourself
 
 You need an unlocked Redmi 10C, a Linux PC with `fastboot`, a GitHub account for the kernel build, and the iPhone X iOS 16.7.16 IPSW. **Everything in `userdata` is erased.** Nothing is written to boot, vendor_boot, modem, persist or the partition table.
@@ -98,12 +102,15 @@ python3 tools/mkadt.py shim/out/rain.adt --rain
 
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet \
     shim/out/rain.adt shim/out/payload-rain-debug.bin \
-    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouchch=1'
+    --cmdline 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 sweettouch sweettouchbitbang=1 sweettouchdelay=20 sweetfb_stretch=1' \
+    --blob path/to/focaltech_ts_fw_xinli.bin
 
 MKBOOTIMG=/usr/share/android-tools/mkbootimg/mkbootimg.py \
     shim/build.sh ../shim/out/payload-rain-debug.bin
 cp shim/out/shim-boot.img shim/out/shim-boot-rain-debug.img
 ```
+
+`--blob` is the FTS firmware dumped from your own device; omit it for a display-only image. `mkpayload.py` adds `sweetfw` and `sweetfwlen` itself.
 
 The ADT describes the rain memory map, the 1125×2436 canvas and the iPhone X identity. The shim uses the 720×1650 panel geometry from `shim/console.h`.
 
@@ -121,8 +128,13 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Root on `userdata`, writable |
 | `cpus=4` | All four A73 cores; `cpus=1` is the safe fallback |
 | `sweetfb_hz=30` | CPU frame-copy rate |
-| `sweettouch` | Enable the FTS SPI touch driver (default; `sweettouch=0` disables) |
-| `sweettouchdelay=45` | Seconds to wait before probing touch (default 45) |
+| `sweettouch` | Enable the FTS touch driver (default; `sweettouch=0` disables) |
+| `sweettouchbitbang=1` | Use the GPIO bit-bang SPI path; required on rain because QUP0 FIFO mode is disabled |
+| `sweettouchdelay=20` | Seconds to wait before probing touch (the working image uses 20; the driver default is 45) |
+| `sweetfb_stretch=1` | Stretch the 1125×2436 canvas to 720×1650; without it the sides are cropped by 21 px |
+| `sweetfw`, `sweetfwlen` | Firmware physical address/size; injected by `mkpayload.py --blob`, do not set by hand |
+| `sweettouchfw=1` | Force a firmware upload even if the chip answers with an app id (debug) |
+| `sweettouchnoreset=1` | Skip the reset/upload path (debug) |
 | `sweettouchdma=1` | Force the GENI SE DMA path (auto when FIFO_IF_DISABLE is set) |
 | `sweettouchwatchdog=30` | Panic after N seconds if no touch-down was reported (bring-up) |
 | `sweettouchdiag=1` | Dump touch diagnostics and panic on exit; `2` also panics after 3000 frames |
@@ -132,8 +144,8 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 
 ## Roadmap
 
-1. **FocalTech SPI touch.** QUP0 SE0, reset GPIO86, IRQ GPIO80, AVDD GPIO98, 720×1650 coordinates. Driver written; build it in CI, test on hardware, then replace 10 ms polling with the IRQ line.
-2. **Display polish.** CoreBrightness, DSI/MDP timing, panel power, dot pitch, and a proper solution for the 720×1650 presentation.
+1. **Touch polish.** IRQ-gated polling instead of the 10 ms SPI poll, a settle after the firmware upload, and a shorter start delay. Functional touch is done.
+2. **Display polish.** CoreBrightness, DSI/MDP timing, panel power, dot pitch, and a UI scale closer to the panel's 20:9 aspect.
 3. **Real-time clock** from the PMIC RTC or passed in by the shim.
 4. **GPU / 60 Hz.** CPU composition is the current limit.
 5. **Audio, Wi-Fi, USB and the rest of the phone.**
@@ -143,7 +155,7 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | Path | What |
 | --- | --- |
 | `shim/` | Bare-metal boot shim, boot image v4, Gold hand-off, GIC setup, payload loader |
-| `xnu/patches/` | XNU patch series, applied in order by CI; rain-specific patches start at `0951`, touch is `0953` |
+| `xnu/patches/` | XNU patch series, applied in order by CI; rain-specific patches start at `0951`; touch is `0953`, firmware upload `0954`, display stretch `0955` |
 | `.github/workflows/xnu.yml` | Kernel CI build |
 | `tools/mkadt.py` | Apple Device Tree for rain (`--rain`) and topaz |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot arguments into the shim payload |
@@ -152,7 +164,7 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | `README.topaz.md` | Original topaz README |
 | `CREDITS.md` | Licences and upstream credits |
 
-Not in git: partition backups, live device trees, Apple firmware, root images and build trees.
+Not in git: partition backups, live device trees, Apple firmware, root images, build trees and the FocalTech firmware blob. Boot images containing the blob are kept in private draft releases, not public assets.
 
 ## Credits
 
@@ -161,6 +173,6 @@ Not in git: partition backups, live device trees, Apple firmware, root images an
 - [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) by OOSEX GANG: GPU, display, audio, Wi-Fi and sandbox work (APSL 2.0 / MIT; see [CREDITS.md](CREDITS.md)).
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) and [blacktop/ipsw](https://github.com/blacktop/ipsw).
 - [topaz-woa](https://github.com/MakrSas/topaz-woa): hardware documentation and drivers for SM6225.
-- Apple's open-source XNU, IOHIDFamily, libpthread, hfs and the iPhone X firmware.
+- Apple's open-source XNU, IOHIDFamily, libpthread and hfs. The iPhone X firmware and the FocalTech touch firmware are not distributed here.
 
 iOS itself is Apple's and is not distributed here. This is an experimental project; do not expect a daily driver.
