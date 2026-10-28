@@ -4,11 +4,11 @@
 
 **Apple's XNU kernel and the unmodified iPhone X 16.7.16 userland on a Xiaomi `rain` (Snapdragon 680 / SM6225).**
 
-[Русский](README.ru.md) · [Status](#status) · [Hardware](#hardware) · [How it boots](#how-it-boots) · [Build](#build-it-yourself) · [Roadmap](#roadmap) · [Credits](#credits)
+[Русский](README.ru.md) · [Status](#status) · [Hardware](#hardware) · [How it boots](#how-it-boots) · [Releases](https://github.com/movka2/ios-rain/releases) · [Build](#build-it-yourself) · [Roadmap](#roadmap) · [Credits](#credits)
 
 </div>
 
-> **2026-10-28: touch works.** XNU boots the iPhone X 16.7.16 userland, `SpringBoard` and apps run, and the FocalTech FT8006S touch works after a bit-bang SPI firmware upload on every cold boot. The display is presented as iPhone X 1125×2436 @3x and stretched to the 720×1650 panel, so nothing is cropped. The vendor firmware is not distributed here; see [Touch firmware](#touch-firmware).
+> **2026-10-28: touch works.** XNU boots the iPhone X 16.7.16 userland, `SpringBoard` and apps run, and the FocalTech FT8006S touch works after a bit-bang SPI firmware upload on every cold boot. The display is presented as iPhone X 1125×2436 @3x and stretched to the 720×1650 panel, so nothing is cropped. The release boot images include the vendor firmware; see [Touch firmware](#touch-firmware).
 
 This is a port of [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz), which brought the iPhone X userland to the Redmi Note 12 4G. The original topaz README, including the full engineering history of the XNU port, is preserved as [README.topaz.md](README.topaz.md).
 
@@ -64,7 +64,7 @@ There is no serial console. The shim and kernel draw their console into the fram
 
 ## Touch firmware
 
-The FT8006S has no application firmware in flash: it starts in ROM boot mode and the driver uploads the 128 KiB image over SPI on every cold boot. That image is proprietary and is not in this repository or its public releases. Extract it from your own phone (the vendor firmware used by the stock FTS driver) and pass it to the payload builder with `--blob`; without it the display works but touch does not. The working boot images are kept as private draft releases.
+The FT8006S has no application firmware in flash: it starts in ROM boot mode and the driver uploads the 128 KiB image over SPI on every cold boot. That image is proprietary. The working boot images in the [releases](https://github.com/movka2/ios-rain/releases) include it. To build your own image, extract the firmware from your phone (the vendor firmware used by the stock FTS driver) and pass it to the payload builder with `--blob`; without it the display works but touch does not.
 
 ## Build it yourself
 
@@ -164,7 +164,7 @@ The first boot spends a while on the Apple logo while `launchd` builds its cache
 | `README.topaz.md` | Original topaz README |
 | `CREDITS.md` | Licences and upstream credits |
 
-Not in git: partition backups, live device trees, Apple firmware, root images, build trees and the FocalTech firmware blob. Boot images containing the blob are kept in private draft releases, not public assets.
+Not in git: partition backups, live device trees, Apple firmware, root images, build trees and the FocalTech firmware blob. Boot images containing the blob are published as release assets.
 
 ## Credits
 
@@ -173,6 +173,6 @@ Not in git: partition backups, live device trees, Apple firmware, root images, b
 - [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) by OOSEX GANG: GPU, display, audio, Wi-Fi and sandbox work (APSL 2.0 / MIT; see [CREDITS.md](CREDITS.md)).
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) and [blacktop/ipsw](https://github.com/blacktop/ipsw).
 - [topaz-woa](https://github.com/MakrSas/topaz-woa): hardware documentation and drivers for SM6225.
-- Apple's open-source XNU, IOHIDFamily, libpthread and hfs. The iPhone X firmware and the FocalTech touch firmware are not distributed here.
+- Apple's open-source XNU, IOHIDFamily, libpthread and hfs. The iPhone X userland is not distributed here; the FocalTech firmware is included in the release boot images.
 
 iOS itself is Apple's and is not distributed here. This is an experimental project; do not expect a daily driver.
