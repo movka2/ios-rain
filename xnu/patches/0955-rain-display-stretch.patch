@@ -1,0 +1,120 @@
+From: rain
+Subject: [PATCH] rain: stretch the iPhone X canvas to the 720x1650 panel
+
+sweetfb_stretch=1 maps the full 1125x2436 canvas to 720x1650 instead of
+fitting the height and cropping 21 px on each side. Touch uses the same
+non-uniform mapping. Without the boot arg the old fit-height crop remains.
+---
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e5617f2..8c947d9 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -170,6 +170,7 @@ public:
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	bool          fScale;                   /* scale logical display to the panel */
++	bool          fStretch;                 /* fScale: stretch, no side crop */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -333,6 +334,7 @@ AppleCLCD::start(IOService *provider)
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+ 	fScale = false;
++	fStretch = false;
+ 	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+@@ -340,10 +342,19 @@ AppleCLCD::start(IOService *provider)
+ 		fScale = (fWidth == 720 && fHeight == 1650);
+ 	}
+ 	if (fScale) {
+-		/* Fit the logical height to the panel, centered; crop the sides. */
+-		int64_t scaledW = ((int64_t)fLogicalW * fHeight) / fLogicalH;
+-		fOffX = (int32_t)((fWidth - scaledW) / 2);
+-		fOffY = 0;
++		int stretch = 0;
++		PE_parse_boot_argn("sweetfb_stretch", &stretch, sizeof(stretch));
++		if (stretch) {
++			/* Full canvas, squeezed horizontally: no side crop. */
++			fStretch = true;
++			fOffX = 0;
++			fOffY = 0;
++		} else {
++			/* Fit the logical height to the panel, centered; crop the sides. */
++			int64_t scaledW = ((int64_t)fLogicalW * fHeight) / fLogicalH;
++			fOffX = (int32_t)((fWidth - scaledW) / 2);
++			fOffY = 0;
++		}
+ 	} else {
+ 		/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 		fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+@@ -1482,10 +1493,18 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			if (fScale) {
+-				int32_t sdx = fOffX + (int32_t)(((int64_t)dx * fHeight) / fLogicalH);
+-				int32_t sdy = fOffY + (int32_t)(((int64_t)dy * fHeight) / fLogicalH);
+-				int32_t sdw = (int32_t)(((int64_t)w * fHeight) / fLogicalH);
+-				int32_t sdh = (int32_t)(((int64_t)h * fHeight) / fLogicalH);
++				int32_t sdx, sdy, sdw, sdh;
++				if (fStretch) {
++					sdx = (int32_t)(((int64_t)dx * fWidth) / fLogicalW);
++					sdy = (int32_t)(((int64_t)dy * fHeight) / fLogicalH);
++					sdw = (int32_t)(((int64_t)w * fWidth) / fLogicalW);
++					sdh = (int32_t)(((int64_t)h * fHeight) / fLogicalH);
++				} else {
++					sdx = fOffX + (int32_t)(((int64_t)dx * fHeight) / fLogicalH);
++					sdy = fOffY + (int32_t)(((int64_t)dy * fHeight) / fLogicalH);
++					sdw = (int32_t)(((int64_t)w * fHeight) / fLogicalH);
++					sdh = (int32_t)(((int64_t)h * fHeight) / fLogicalH);
++				}
+ 				sweet_blit_scaled(dst, fRowBytes, (int32_t)fWidth, (int32_t)fHeight,
+ 				    (const uint8_t *)(src + s->offset), s->bytesPerRow,
+ 				    sx, sy, w, h, sdx, sdy, sdw, sdh);
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index fcdeb67..95e6e6b 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -368,6 +368,7 @@ protected:
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	bool fStretch;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -438,6 +439,14 @@ SweetHIDTouch::start(IOService *provider)
+ 	fLogicalH = native ? 1650 : 2436;
+ 	fOffX = native ? 0 : -21;                        /* scaled display origin, as SweetFramebuffer.cpp */
+ 	fOffY = 0;
++	fStretch = false;
++	int stretch = 0;
++	PE_parse_boot_argn("sweetfb_stretch", &stretch, sizeof(stretch));
++	if (stretch && !native) {
++		fStretch = true;
++		fOffX = 0;
++		fOffY = 0;
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -463,9 +472,15 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the 1125x2436 display scaled to 720x1650 (SweetFramebuffer.cpp). */
+-	int lx = (int)(((int64_t)(x - fOffX) * fLogicalH) / 1650);
+-	int ly = (int)(((int64_t)(y - fOffY) * fLogicalH) / 1650);
++	/* Panel pixels -> logical display (SweetFramebuffer.cpp: fit-height crop or stretch). */
++	int lx, ly;
++	if (fStretch) {
++		lx = (int)(((int64_t)x * fLogicalW) / 720);
++		ly = (int)(((int64_t)y * fLogicalH) / 1650);
++	} else {
++		lx = (int)(((int64_t)(x - fOffX) * fLogicalH) / 1650);
++		ly = (int)(((int64_t)(y - fOffY) * fLogicalH) / 1650);
++	}
+ 	lx = lx < 0 ? 0 : (lx >= fLogicalW ? fLogicalW - 1 : lx);
+ 	ly = ly < 0 ? 0 : (ly >= fLogicalH ? fLogicalH - 1 : ly);
+ 	IOFixed nx = (IOFixed)(((int64_t)lx << 16) / fLogicalW);
