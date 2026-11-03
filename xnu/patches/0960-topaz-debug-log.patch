@@ -1,0 +1,71 @@
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -6274,14 +6274,17 @@
+ 	state = -1;
+ 	soc_lock = IOLockAlloc();
+ 	(void)PE_parse_boot_argn("modem_part", fw_part, sizeof(fw_part));
++	printf("TopazModem: soc_map part=%s\n", fw_part);
+ 	uint8_t probe[16];
+ 	int err = EAGAIN;
+ 	for (int i = 0; i < 120 && err == EAGAIN; i++) {
+ 		err = sweet_ufs_read_part(fw_part, fw_files[0].off, probe, sizeof(probe));
+ 		if (err == EAGAIN) {
++			printf("TopazModem: waiting for %s (%d/120)\n", fw_part, i + 1);
+ 			IOSleep(500);
+ 		}
+ 	}
++	printf("TopazModem: ufs probe err=%d\n", err);
+ 	smem_map = err == 0 ? map_phys(SMEM_PA, SMEM_SIZE, true) : NULL;
+ 	pool_map = err == 0 ? map_phys(MODEM_POOL_BASE, MODEM_POOL_SIZE, true) : NULL;
+ 	apcs = (volatile uint8_t *)ml_io_map(APCS_PA, 0x1000);
+@@ -6366,10 +6369,13 @@
+ 	IOMemoryMap *smem_map, *pool_map;
+ 	unsigned watch = 0;                         /* 0: serve the modem for the whole session */
+ 
++	printf("TopazModem: thread start\n");
+ 	(void)PE_parse_boot_argn("modem_watch", &watch, sizeof(watch));
+ 	(void)smem_map;
+ 	(void)pool_map;
+-	if (!topaz_soc_map()) {
++	bool mapped = topaz_soc_map();
++	printf("TopazModem: soc_map %s\n", mapped ? "ok" : "failed");
++	if (!mapped) {
+ 		thread_terminate(current_thread());
+ 		return;
+ 	}
+@@ -6398,9 +6404,14 @@
+ 		return;
+ 	}
+ 	started = true;
++	printf("TopazModem: init (modem=%u)\n", on);
+ 	topaz_sta_init();                           /* private: bsd/dev/topaz_sta.c (en0 + Apple80211 for wifid) */
++	printf("TopazModem: sta_init done\n");
+ 	if (kernel_thread_start(topaz_modem_thread, NULL, &thread) == KERN_SUCCESS) {
++		printf("TopazModem: thread started\n");
+ 		thread_deallocate(thread);
++	} else {
++		printf("TopazModem: thread start failed\n");
+ 	}
+ }
+ 
+diff --git a/bsd/dev/topaz_sta.c b/bsd/dev/topaz_sta.c
+--- a/bsd/dev/topaz_sta.c
++++ b/bsd/dev/topaz_sta.c
+@@ -211,6 +211,7 @@
+ sta_ready(void)
+ {
+ 	thread_t thread;
++	printf("topaz wifi: radio ready\n");
+ 	if (kernel_thread_start(sta_bring_up, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+@@ -221,6 +222,8 @@
+ void
+ topaz_sta_init(void)
+ {
++	printf("topaz wifi: sta_init enter\n");
+ 	MiniIONetworkStackStart();              /* configd waits for it before it calls the registry quiet */
++	printf("topaz wifi: sta_init done\n");
+ 	topaz_wlan_ready_hook = sta_ready;
+ }
