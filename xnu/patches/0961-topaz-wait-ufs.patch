@@ -1,0 +1,18 @@
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -6277,10 +6277,12 @@
+ 	printf("TopazModem: soc_map part=%s\n", fw_part);
+ 	uint8_t probe[16];
+ 	int err = EAGAIN;
+-	for (int i = 0; i < 120 && err == EAGAIN; i++) {
++	for (unsigned i = 0; err == EAGAIN; i++) {
+ 		err = sweet_ufs_read_part(fw_part, fw_files[0].off, probe, sizeof(probe));
+ 		if (err == EAGAIN) {
+-			printf("TopazModem: waiting for %s (%d/120)\n", fw_part, i + 1);
++			if ((i % 20) == 0) {
++				printf("TopazModem: waiting for %s (%us)\n", fw_part, i / 2);
++			}
+ 			IOSleep(500);
+ 		}
+ 	}
