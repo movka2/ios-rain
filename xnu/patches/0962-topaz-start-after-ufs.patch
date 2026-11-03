@@ -1,0 +1,30 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -316,7 +316,6 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+-	topaz_modem_init();
+ 	topaz_audio_init();
+ 	sweet_amfi_service_init();
+ 	sweet_busy_init();
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -438,6 +438,7 @@
+ 	return ENOENT;
+ }
+ 
++extern void topaz_modem_init(void);
+ int sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len);
+ int
+ sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len)
+@@ -808,6 +809,7 @@
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	topaz_modem_init();
+ 	sweet_sample_start();
+ 	thread_t gpt_thread;
+ 	if (kernel_thread_start(sweet_gpt_watch, NULL, &gpt_thread) == KERN_SUCCESS) {
